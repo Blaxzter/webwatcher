@@ -42,14 +42,9 @@ defaults:
 
 sites:
     # Minimalfall: ganze Seite beobachten
-
-    - name: Meine Seite
-      url: https://kilmainhamgaol.admit-one.eu/?p=calendar&ev=TOUR&mn=202608
+    - name: Beispiel
+      url: https://example.com
       interval: 15m
-      selector: div.OPW_mainContent
-
-      # - name: Beispiel
-      #   url: https://example.com
 
       # # Realistischer: nur ein Bereich, ohne Werbung/Zeitstempel, alle 5 Minuten
       # - name: Shop Produktseite
