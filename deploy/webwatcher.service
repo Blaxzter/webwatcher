@@ -1,0 +1,33 @@
+# systemd-Unit für den Betrieb ohne Docker.
+# Installation:
+#   sudo cp deploy/webwatcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now webwatcher
+#
+# Erwartet: /opt/webwatcher mit venv unter /opt/webwatcher/.venv,
+# config.yaml und .env im selben Verzeichnis.
+
+[Unit]
+Description=webwatcher - Webseiten auf Änderungen prüfen
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webwatcher
+Group=webwatcher
+WorkingDirectory=/opt/webwatcher
+EnvironmentFile=/opt/webwatcher/.env
+ExecStart=/opt/webwatcher/.venv/bin/webwatcher --config /opt/webwatcher/config.yaml run
+Restart=always
+RestartSec=10
+
+# Etwas Härtung; Chromium braucht /dev/shm und ein beschreibbares Home.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/webwatcher
+
+[Install]
+WantedBy=multi-user.target

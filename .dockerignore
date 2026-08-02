@@ -1,0 +1,16 @@
+# Hält den Build-Context klein. Das Image braucht nur pyproject.toml,
+# README.md und src/ (siehe Dockerfile).
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.ruff_cache/
+
+# Laufzeitdaten und Secrets gehören nicht in den Build-Context.
+data/
+.env
+config.yaml
+*.sqlite3*
+
+.git/
+.gitignore

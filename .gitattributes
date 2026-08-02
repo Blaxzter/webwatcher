@@ -1,0 +1,10 @@
+# Im Repo immer LF. Ohne das checkt Git unter Windows CRLF aus, und ein
+# deploy.sh oder Dockerfile mit CRLF scheitert auf dem Server mit
+# "bad interpreter: /usr/bin/env bash^M".
+* text=auto eol=lf
+
+# PowerShell darf Windows-Zeilenenden behalten.
+*.ps1 text eol=crlf
+
+*.png binary
+*.ico binary

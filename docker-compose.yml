@@ -1,0 +1,23 @@
+services:
+  webwatcher:
+    build: .
+    image: webwatcher:latest
+    container_name: webwatcher
+    restart: unless-stopped
+    env_file: .env
+    # Chromium bricht sonst gern mit "Target closed" ab.
+    shm_size: "1gb"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      # Named Volume: Docker legt es mit den Rechten des Container-Users an.
+      # Ein Bind-Mount (./data:/app/data) würde root gehören und der Container
+      # läuft als UID 10001 -> "permission denied". Siehe README.
+      - webwatcher-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  webwatcher-data:

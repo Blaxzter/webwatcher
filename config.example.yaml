@@ -1,0 +1,106 @@
+# webwatcher - Beispielkonfiguration
+# Kopieren: cp config.example.yaml config.yaml
+#
+# ${VAR} und ${VAR:-fallback} werden aus Umgebungsvariablen ersetzt,
+# damit keine Secrets in der Datei landen.
+
+telegram:
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    # Ein Empfänger, mehrere mit Komma (TELEGRAM_CHAT_ID=123,456) oder als Liste:
+    #   chat_id: [123456789, 987654321]
+    chat_id: ${TELEGRAM_CHAT_ID}
+    send_screenshot: true # Screenshot mitschicken
+    silent: false # true = Nachricht ohne Ton
+
+storage:
+    db_path: data/watcher.sqlite3
+    screenshot_dir: data/screenshots
+    keep_screenshots: 20 # pro Seite; 0 = keine speichern
+    history_days: 30 # Check-Historie danach aufräumen
+
+concurrency: 2 # wie viele Seiten parallel geprüft werden
+jitter: 5s # zufällige Streuung, damit nicht alles gleichzeitig läuft
+
+# Gilt für alle Seiten und kann pro Seite überschrieben werden.
+defaults:
+    interval: 15m
+    wait_until: networkidle # load | domcontentloaded | networkidle | commit
+    timeout: 30s
+    settle: 0s # zusätzliche Wartezeit nach dem Laden
+    # auto = folgt dem selector: ein Treffer -> nur dieses Element, mehrere -> ganze
+    # Seite, kein selector -> sichtbarer Bereich. Zeigt also, was beobachtet wird.
+    screenshot: auto # auto | full_page | viewport | element | none
+    viewport:
+        width: 1440
+        height: 900
+    locale: de-DE
+    timezone: Europe/Berlin
+    notify_on_error_after: 3 # erst nach 3 Fehlern in Folge meckern
+    min_changed_lines: 1 # kleinere Änderungen still übernehmen
+    max_diff_lines: 60 # Diff in der Nachricht kürzen
+    notify_first_check: true # Meldung beim Anlegen der Baseline
+
+sites:
+    # Minimalfall: ganze Seite beobachten
+
+    - name: Meine Seite
+      url: https://kilmainhamgaol.admit-one.eu/?p=calendar&ev=TOUR&mn=202608
+      interval: 15m
+      selector: div.OPW_mainContent
+
+      # - name: Beispiel
+      #   url: https://example.com
+
+      # # Realistischer: nur ein Bereich, ohne Werbung/Zeitstempel, alle 5 Minuten
+      # - name: Shop Produktseite
+      #   url: https://example.com/produkt/123
+      #   interval: 5m
+      #   selector: "#product-main"        # nur dieser Teil wird verglichen
+      #   wait_for: ".price"               # warte bis dieses Element da ist
+      #   ignore_selectors:                # aus dem Vergleich entfernen
+      #     - ".advertisement"
+      #     - "#cookie-banner"
+      #     - ".recently-viewed"
+      #   ignore_patterns:                 # Zeilen per Regex ignorieren
+      #     - '^Stand: \d{2}\.\d{2}\.\d{4}'
+      #     - '\d+ Besucher online'
+      #   screenshot: full_page
+      #   min_changed_lines: 2
+
+      # # Seite hinter Cookie-Banner / mit Lazy Loading
+      # - name: Amt Bekanntmachungen
+      #   url: https://example.org/bekanntmachungen
+      #   interval: 1h
+      #   settle: 2s
+      #   js: |
+      #     document.querySelector('#cookie-accept')?.click();
+      #     window.scrollTo(0, document.body.scrollHeight);
+      #   ignore_selectors:
+      #     - "footer"
+
+      # # Ganze Liste beobachten: der Selektor trifft mehrere Elemente, alle werden
+      # # verglichen. Neue/entfallene Einträge tauchen dadurch im Diff auf.
+      # - name: Neue Stellenangebote
+      #   url: https://example.com/jobs
+      #   interval: 30m
+      #   selector: ".job-card"
+      #   ignore_patterns:
+      #     - 'vor \d+ (Minuten|Stunden|Tagen)'
+
+      # # Zustand steckt nur in der CSS-Klasse (Ticketkalender: die Tageszahl
+      # # bleibt gleich, nur daySoldOut -> dayAvail wechselt). Ohne
+      # # track_attributes wäre das im Textvergleich unsichtbar.
+      # - name: Tickets August
+      #   url: https://beispiel.de/kalender
+      #   interval: 15m
+      #   selector: div.calendar
+      #   track_attributes: [class]
+
+      # # Nur HTML-Struktur vergleichen (erkennt auch Änderungen an Links/Attributen)
+      # - name: Downloads
+      #   url: https://example.net/downloads
+      #   mode: html
+      #   interval: 6h
+      #   selector: "table.files"
+      #   screenshot: element
+      #   enabled: true
