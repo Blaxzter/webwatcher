@@ -18,6 +18,8 @@ User=webwatcher
 Group=webwatcher
 WorkingDirectory=/opt/webwatcher
 EnvironmentFile=/opt/webwatcher/.env
+# Für die Weboberfläche: '--web --web-host 127.0.0.1' anhängen und einen
+# Reverse Proxy davorsetzen. Sie hat keine eigene Anmeldung (siehe README).
 ExecStart=/opt/webwatcher/.venv/bin/webwatcher --config /opt/webwatcher/config.yaml run
 Restart=always
 RestartSec=10

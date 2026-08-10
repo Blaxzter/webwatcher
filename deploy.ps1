@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [string]$Remote = "hetzner",
-    [string]$RemoteDir = "~/docker/watcher",
+    [string]$RemoteDir = "~/docker/watcher/watcher",
     [switch]$Restart,
     [switch]$IncludeEnv,
     [switch]$DryRun

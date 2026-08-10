@@ -38,7 +38,30 @@ CREATE TABLE IF NOT EXISTS checks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_checks_site_time ON checks (site_key, checked_at DESC);
+
+-- Die gewünschte Konfiguration einer Seite, als rohes YAML/JSON-Mapping.
+-- Bewusst getrennt von `sites`: dort steht der beobachtete Zustand, hier der
+-- Sollzustand. Das Mapping bleibt ungeparst, damit `site_from_mapping()` die
+-- einzige Validierung im Programm bleibt - egal ob es aus der config.yaml
+-- oder aus dem Web-UI kommt.
+CREATE TABLE IF NOT EXISTS site_configs (
+    key        TEXT PRIMARY KEY,
+    data       TEXT NOT NULL,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+# Jede Änderung an site_configs zählt hoch. Der Runner vergleicht nur diese Zahl
+# und baut die SiteConfigs (inkl. Regex-Kompilierung) nur dann neu.
+REVISION_KEY = "sites_revision"
 
 
 def utcnow() -> datetime:
@@ -178,6 +201,84 @@ class Store:
                 """,
                 (key,),
             )
+
+    # -- site configuration -------------------------------------------------
+
+    def sites_revision(self) -> int:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (REVISION_KEY,)).fetchone()
+        return int(row["value"]) if row else 0
+
+    def _bump_revision(self) -> None:
+        """Caller must already hold the `with self.conn` transaction."""
+        self.conn.execute(
+            """
+            INSERT INTO meta (key, value) VALUES (?, '1')
+            ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+            """,
+            (REVISION_KEY,),
+        )
+
+    def site_configs(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM site_configs ORDER BY position, key").fetchall()
+
+    def get_site_config(self, key: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM site_configs WHERE key = ?", (key,)).fetchone()
+
+    def next_position(self) -> int:
+        row = self.conn.execute("SELECT MAX(position) AS top FROM site_configs").fetchone()
+        return (row["top"] + 1) if row and row["top"] is not None else 0
+
+    def put_site_config(
+        self,
+        key: str,
+        data: str,
+        position: int | None = None,
+        actor: str | None = None,
+    ) -> None:
+        now = to_iso(utcnow())
+        slot = self.next_position() if position is None else position
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO site_configs (key, data, position, created_at, updated_at, updated_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    data = excluded.data,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+                """,
+                (key, data, slot, now, now, actor),
+            )
+            self._bump_revision()
+
+    def delete_site_config(self, key: str) -> None:
+        """Drop the config together with its state and history - no orphans."""
+        with self.conn:
+            self.conn.execute("DELETE FROM site_configs WHERE key = ?", (key,))
+            self.conn.execute("DELETE FROM sites WHERE key = ?", (key,))
+            self.conn.execute("DELETE FROM checks WHERE site_key = ?", (key,))
+            self._bump_revision()
+
+    def rename_site(self, old_key: str, new_key: str) -> None:
+        """Carry state and history over to the new key, so a rename keeps the baseline."""
+        with self.conn:
+            self.conn.execute("UPDATE site_configs SET key = ? WHERE key = ?", (new_key, old_key))
+            # Ein Zustand unter dem neuen Key kann existieren, wenn es die Seite
+            # dort schon einmal gab - dann gewinnt der mitgebrachte.
+            self.conn.execute("DELETE FROM sites WHERE key = ?", (new_key,))
+            self.conn.execute("UPDATE sites SET key = ? WHERE key = ?", (new_key, old_key))
+            self.conn.execute(
+                "UPDATE checks SET site_key = ? WHERE site_key = ?", (new_key, old_key)
+            )
+            self._bump_revision()
+
+    def set_positions(self, keys: list[str]) -> None:
+        with self.conn:
+            for index, key in enumerate(keys):
+                self.conn.execute(
+                    "UPDATE site_configs SET position = ? WHERE key = ?", (index, key)
+                )
+            self._bump_revision()
 
     # -- history ------------------------------------------------------------
 

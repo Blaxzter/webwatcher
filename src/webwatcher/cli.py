@@ -9,14 +9,22 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from webwatcher import __version__
 from webwatcher.browser import Renderer
-from webwatcher.config import Config, ConfigError, SiteConfig, load_config
+from webwatcher.config import (
+    Config,
+    ConfigError,
+    SiteConfig,
+    format_duration,
+    load_config,
+)
 from webwatcher.notify.telegram import TelegramError, TelegramNotifier
 from webwatcher.runner import Runner
-from webwatcher.store import Store, from_iso
+from webwatcher.sites import SiteRepository
+from webwatcher.store import Store, from_iso, utcnow
 
 log = logging.getLogger("webwatcher")
 
@@ -37,13 +45,6 @@ def setup_logging(verbose: bool) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
-
-
-def format_duration(seconds: float) -> str:
-    for limit, unit, factor in ((60, "s", 1), (3600, "m", 60), (86400, "h", 3600)):
-        if seconds < limit:
-            return f"{seconds / factor:g}{unit}"
-    return f"{seconds / 86400:g}d"
 
 
 def select_sites(config: Config, names: list[str] | None) -> list[SiteConfig]:
@@ -83,14 +84,37 @@ def make_notifier(
     return None
 
 
+def open_repo(config: Config, store: Store) -> SiteRepository:
+    """Die Seiten kommen aus der Datenbank, nicht mehr aus der config.yaml."""
+    repo = SiteRepository(store, config.site_defaults, config.screenshot_dir)
+    entries = repo.entries()
+    if not entries and config.seed_sites:
+        log.warning(
+            "In %s stehen %d Seite(n), die noch nicht übernommen wurden. "
+            "Einmalig ausführen: webwatcher import-config",
+            config.source_path.name if config.source_path else "der Konfiguration",
+            len(config.seed_sites),
+        )
+    config.replace_sites(repo.sites())
+    return repo
+
+
+@contextlib.contextmanager
+def open_config(config: Config):
+    """Store öffnen und die Seiten aus der Datenbank nachladen."""
+    with Store(config.db_path) as store:
+        yield store, open_repo(config, store)
+
+
 @contextlib.asynccontextmanager
 async def build_runner(config: Config, notify: bool):
     store = Store(config.db_path)
+    repo = open_repo(config, store)
     notifier = make_notifier(config, required=False) if notify else None
     renderer = Renderer()
     try:
         await renderer.start()
-        yield Runner(config, store, renderer, notifier)
+        yield Runner(config, store, renderer, notifier, repo)
     finally:
         await renderer.close()
         if notifier:
@@ -101,7 +125,28 @@ async def build_runner(config: Config, notify: bool):
 # -- commands ---------------------------------------------------------------
 
 
+async def start_web(config: Config, runner: Runner):
+    """Startet das Web-UI im selben Event-Loop; None, wenn es aus ist."""
+    if not config.web.enabled:
+        return None
+    try:
+        from webwatcher.web.server import serve
+    except ImportError as exc:
+        raise SystemExit(
+            f"Das Web-UI braucht aiohttp ({exc}). Installieren mit:\n"
+            "  pip install 'webwatcher[web]'"
+        ) from None
+    return await serve(config, runner.store, runner.repo, runner)
+
+
 async def cmd_run(args: argparse.Namespace, config: Config) -> int:
+    if args.web:
+        config.web = replace(config.web, enabled=True)
+    if args.web_port:
+        config.web = replace(config.web, port=args.web_port, enabled=True)
+    if args.web_host:
+        config.web = replace(config.web, host=args.web_host, enabled=True)
+
     async with build_runner(config, notify=True) as runner:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -110,26 +155,58 @@ async def cmd_run(args: argparse.Namespace, config: Config) -> int:
             except (NotImplementedError, AttributeError):
                 # Windows: fall back to KeyboardInterrupt handling below.
                 pass
+
+        web_runner = await start_web(config, runner)
         try:
             await runner.run_forever()
         except KeyboardInterrupt:
             runner.request_stop()
+        finally:
+            if web_runner is not None:
+                await web_runner.cleanup()
+    return 0
+
+
+def cmd_import(args: argparse.Namespace, config: Config) -> int:
+    """Seiten aus der config.yaml in die Datenbank übernehmen."""
+    source = config.source_path
+    mappings = config.seed_sites
+    if not mappings:
+        print(f"In {source} steht kein 'sites:'-Block – nichts zu übernehmen.")
+        return 0
+
+    with Store(config.db_path) as store:
+        repo = SiteRepository(store, config.site_defaults, config.screenshot_dir)
+        added, skipped = repo.import_mappings(mappings, actor="import-config")
+
+    for key in added:
+        print(f"übernommen: {key}")
+    for label, reason in skipped:
+        print(f"übersprungen: {label} ({reason})")
+    print(f"\n{len(added)} übernommen, {len(skipped)} übersprungen.")
+    if added:
+        print(
+            "Die Seiten liegen jetzt in der Datenbank und werden dort gepflegt.\n"
+            f"Der 'sites:'-Block in {source.name} wird nicht mehr gelesen und kann weg."
+        )
     return 0
 
 
 NO_SITES_HINT = (
-    "Es sind noch keine Seiten konfiguriert. Eine anlegen mit:\n"
+    "Es sind noch keine Seiten eingerichtet. Eine anlegen:\n"
+    "  im Web-UI (webwatcher run --web) unter 'Neue Seite', oder\n"
     "  webwatcher pick https://die-seite-die-du-beobachten-willst.de\n"
-    "oder von Hand unter 'sites:' in die config.yaml eintragen."
+    "Aus einer bestehenden config.yaml übernehmen: webwatcher import-config"
 )
 
 
 async def cmd_check(args: argparse.Namespace, config: Config) -> int:
-    sites = select_sites(config, args.site)
-    if not sites:
-        print(NO_SITES_HINT)
-        return 0
     async with build_runner(config, notify=not args.no_notify) as runner:
+        # Erst hier stehen die Seiten aus der Datenbank in der Config.
+        sites = select_sites(config, args.site)
+        if not sites:
+            print(NO_SITES_HINT)
+            return 0
         outcomes = await runner.check_once(sites, notify=not args.no_notify)
 
     failed = 0
@@ -146,10 +223,13 @@ async def cmd_check(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_list(args: argparse.Namespace, config: Config) -> int:
-    if not config.sites:
-        print(NO_SITES_HINT)
-        return 0
-    with Store(config.db_path) as store:
+    now = utcnow()
+    with open_config(config) as (store, repo):
+        broken = [entry for entry in repo.entries() if not entry.valid]
+        if not config.sites and not broken:
+            print(NO_SITES_HINT)
+            return 0
+
         print(f"{'KEY':<24} {'INTERVAL':>9}  {'LETZTER CHECK':<20} STATUS")
         for site in config.sites:
             state = store.get_state(site.key)
@@ -168,21 +248,32 @@ def cmd_list(args: argparse.Namespace, config: Config) -> int:
                     if changed
                     else "ok"
                 )
-            interval = format_duration(site.interval_seconds)
+            # Zeigt den Takt, der gerade gilt - '*' heisst: aus einem Zeitfenster.
+            window = site.active_window(now)
+            interval = format_duration(site.interval_at(now)) + ("*" if window else "")
             print(f"{site.key:<24} {interval:>9}  {last_str:<20} {status}")
             if args.verbose:
                 print(f"{'':<24} {site.url}")
+                for configured in site.interval_windows:
+                    marker = "*" if configured is window else " "
+                    print(f"{'':<24}{marker}Fenster {configured.describe()} ({site.timezone})")
+
+        for entry in broken:
+            print(f"{entry.key:<24} {'-':>9}  {'-':<20} ungültig: {entry.error}")
+
+    if any(site.interval_windows for site in config.sites):
+        print("\n* = Zeitfenster gerade aktiv, der Takt kommt von dort (alle: webwatcher -v list)")
     return 0
 
 
 def cmd_history(args: argparse.Namespace, config: Config) -> int:
-    site_key = None
-    if args.site:
-        site = config.get_site(args.site)
-        if site is None:
-            raise SystemExit(f"Unbekannte Seite: {args.site!r}")
-        site_key = site.key
-    with Store(config.db_path) as store:
+    with open_config(config) as (store, _repo):
+        site_key = None
+        if args.site:
+            site = config.get_site(args.site)
+            if site is None:
+                raise SystemExit(f"Unbekannte Seite: {args.site!r}")
+            site_key = site.key
         rows = store.recent_checks(site_key, args.limit)
         if not rows:
             print("Keine Checks aufgezeichnet.")
@@ -201,9 +292,8 @@ def cmd_history(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_reset(args: argparse.Namespace, config: Config) -> int:
-    sites = select_sites(config, args.site)
-    with Store(config.db_path) as store:
-        for site in sites:
+    with open_config(config) as (store, _repo):
+        for site in select_sites(config, args.site):
             store.reset_site(site.key)
             print(f"Baseline zurückgesetzt: {site.name}")
     return 0
@@ -233,15 +323,24 @@ async def cmd_test_telegram(args: argparse.Namespace, config: Config) -> int:
 async def cmd_pick(args: argparse.Namespace, config: Config | None) -> int:
     from webwatcher.picker import run_picker
 
-    return await run_picker(
-        args.url,
-        name=args.name,
-        interval=args.interval,
-        config=config,
-        profile=Path(args.profile) if args.profile else None,
-        write=not args.no_write,
-        headless=args.headless,
-    )
+    store = None
+    repo = None
+    if config is not None:
+        store = Store(config.db_path)
+        repo = SiteRepository(store, config.site_defaults, config.screenshot_dir)
+    try:
+        return await run_picker(
+            args.url,
+            name=args.name,
+            interval=args.interval,
+            repo=repo,
+            profile=Path(args.profile) if args.profile else None,
+            write=not args.no_write,
+            headless=args.headless,
+        )
+    finally:
+        if store is not None:
+            store.close()
 
 
 async def cmd_chat_id(args: argparse.Namespace, config: Config) -> int:
@@ -298,6 +397,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="Daemon: prüft alle Seiten in ihrem Intervall")
+    run.add_argument(
+        "--web",
+        action="store_true",
+        help="Web-UI mitstarten (bringt keine eigene Anmeldung mit - hinter einen Proxy!)",
+    )
+    run.add_argument("--web-port", type=int, help="Port für das Web-UI (Default: 8080)")
+    run.add_argument("--web-host", help="Adresse für das Web-UI (Default: 0.0.0.0)")
     run.set_defaults(func=cmd_run, is_async=True)
 
     check = sub.add_parser("check", help="Einmalig prüfen (alle Seiten oder ausgewählte)")
@@ -324,8 +430,13 @@ def build_parser() -> argparse.ArgumentParser:
     chat = sub.add_parser("chat-id", help="Chat-ID aus den letzten Bot-Updates auslesen")
     chat.set_defaults(func=cmd_chat_id, is_async=True)
 
+    importer = sub.add_parser(
+        "import-config", help="Seiten aus dem 'sites:'-Block der config.yaml übernehmen"
+    )
+    importer.set_defaults(func=cmd_import, is_async=False)
+
     pick = sub.add_parser(
-        "pick", help="Elemente im Browser anklicken und daraus einen Config-Block bauen"
+        "pick", help="Elemente im Browser anklicken und daraus eine Seite anlegen"
     )
     pick.add_argument("url", help="Zu beobachtende URL")
     pick.add_argument("--name", help="Name der Seite (Default: die URL)")
@@ -335,7 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verzeichnis für ein dauerhaftes Browser-Profil (für Seiten hinter Login)",
     )
     pick.add_argument(
-        "--no-write", action="store_true", help="Block nur ausgeben, config.yaml nicht ändern"
+        "--no-write", action="store_true", help="Block nur ausgeben, nichts speichern"
     )
     # Nur für Tests: ohne sichtbares Fenster starten.
     pick.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)

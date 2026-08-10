@@ -4,7 +4,10 @@ Rendert Webseiten mit Playwright (echtes Chromium, also auch JS-lastige Seiten),
 vergleicht den Inhalt mit dem letzten Stand und schickt bei Änderungen eine
 Telegram-Nachricht mit Diff und Screenshot.
 
-Läuft eigenständig — kein Postgres, kein FastAPI. State liegt in einer SQLite-Datei.
+Läuft eigenständig — kein Postgres, kein Build-Schritt. Alles liegt in einer
+SQLite-Datei: die beobachteten Seiten, ihr Zustand und die Historie. Gepflegt
+werden sie im Terminal oder in einer [Weboberfläche](#weboberfläche), die im
+selben Prozess mitläuft.
 
 ```
 🔔 Shop Produktseite hat sich geändert
@@ -112,15 +115,19 @@ TELEGRAM_BOT_TOKEN=8123456789:AAHk3l-BeispielToken_xyz
 TELEGRAM_CHAT_ID=123456789
 ```
 
-`config.yaml` bearbeiten (`nano config.yaml`) — die Beispielseiten unter
-`sites:` durch deine ersetzen. Minimal reicht:
+In der `config.yaml` stehen Telegram, Speicherorte und Voreinstellungen. Die
+beobachteten **Seiten stehen dort nicht** — die liegen in der Datenbank und
+werden über die [Weboberfläche](#weboberfläche) oder `webwatcher pick`
+gepflegt. Für den Anfang reicht die Datei also so, wie sie ist.
 
-```yaml
-sites:
-  - name: Meine Seite
-    url: https://example.com/das-was-dich-interessiert
-    interval: 15m
+Hast du schon einen `sites:`-Block (oder willst ihn aus dem Beispiel
+übernehmen), holst du ihn einmalig in die Datenbank:
+
+```bash
+docker compose run --rm webwatcher import-config
 ```
+
+Danach wird der Block nicht mehr gelesen und kann raus.
 
 ### 7. Testen und starten
 
@@ -145,7 +152,7 @@ automatisch wieder an.
 PowerShell:
 
 ```powershell
-.\deploy.ps1                    # überträgt nach hetzner:~/docker/watcher
+.\deploy.ps1                    # überträgt nach hetzner:~/docker/watcher/watcher
 .\deploy.ps1 -Restart           # überträgt und startet neu
 .\deploy.ps1 -IncludeEnv -Restart   # inklusive .env (neuer Token/neue Chat-ID)
 .\deploy.ps1 -Remote meinserver -RemoteDir /srv/ww
@@ -164,7 +171,7 @@ sie — `deploy.ps1 -Restart` macht genau das.
 Bash (macOS, Linux, Git Bash):
 
 ```bash
-./deploy.sh                     # überträgt nach hetzner:~/docker/watcher
+./deploy.sh                     # überträgt nach hetzner:~/docker/watcher/watcher
 ./deploy.sh --restart           # überträgt und startet neu
 ./deploy.sh meinserver /srv/ww  # anderer Host, anderes Verzeichnis
 DRY_RUN=1 ./deploy.sh           # zeigt nur, was übertragen würde
@@ -187,13 +194,13 @@ kann es das nicht, weil seine Standardeingabe vom tar-Stream belegt ist.
 
 ```powershell
 tar czf - -C watcher --exclude=.venv --exclude=__pycache__ --exclude=data --exclude=.env . |
-  ssh hetzner 'mkdir -p ~/docker/watcher && tar xzf - -C ~/docker/watcher'
+  ssh hetzner 'mkdir -p ~/docker/watcher/watcher && tar xzf - -C ~/docker/watcher/watcher'
 ```
 
 Nach dem Übertragen auf dem Server aktivieren:
 
 ```bash
-ssh hetzner 'cd ~/docker/watcher && docker compose up -d --build'
+ssh hetzner 'cd ~/docker/watcher/watcher && docker compose up -d --build'
 ```
 
 ## Im Betrieb
@@ -215,6 +222,90 @@ ein bind-gemountetes `./data` nicht schreiben. Rankommen:
 ```bash
 docker compose cp webwatcher:/app/data/screenshots ./screenshots
 ```
+
+## Weboberfläche
+
+Seiten anlegen, den zu beobachtenden Bereich direkt auf der Seite anklicken,
+Verlauf und Screenshots ansehen, sofort prüfen lassen — alles im Browser. Die
+Oberfläche läuft im selben Prozess wie der Daemon, Änderungen greifen ohne
+Neustart.
+
+> **Sie bringt keine eigene Anmeldung mit.** Wer sie erreicht, kann eigenes
+> JavaScript auf beliebigen Seiten ausführen lassen (`js:` pro Seite) — das ist
+> Codeausführung auf deinem Server. Sie gehört deshalb hinter einen Reverse
+> Proxy, der die Authentifizierung übernimmt, oder auf `127.0.0.1`.
+
+### Hinter Traefik
+
+Die mitgelieferte `docker-compose.yml` veröffentlicht bewusst **keinen**
+Host-Port (`expose:` statt `ports:`) und hängt den Container ins Netz
+`traefik-net`. Der Router steht auf `webwatcher.fabraham.dev` — Domain und
+Netzname dort anpassen, falls sie anders heißen.
+
+```bash
+htpasswd -nB frederic          # Hash für die BasicAuth erzeugen
+nano .env                      # WEBWATCHER_WEB und WEBWATCHER_AUTH eintragen
+docker compose up -d --build
+```
+
+Der Hash gehört in **einfache** Anführungszeichen:
+
+```ini
+WEBWATCHER_AUTH='frederic:$2y$05$oIxYc0dTbCTFOwqfoTZi5u...'
+```
+
+Ohne sie hält Compose `$05$…` für Variablennamen und setzt sie leer ein — der
+Hash wird stillschweigend abgeschnitten, und die Anmeldung geht nie, ohne dass
+irgendwo ein Fehler auftaucht. Doppelte Anführungszeichen helfen nicht; die
+einzige Alternative ist, jedes `$` zu verdoppeln (`$$`). Das betrifft genauso
+die `TRAEFIK_DASHBOARD_AUTH` deines Traefik-Compose.
+
+**Zwei Schichten, mit Absicht.** Cloudflare Access allein genügt nicht: Traefik
+routet nach `Host`-Header, also kommt
+
+```bash
+curl -H "Host: webwatcher.fabraham.dev" https://<server-ip>/ -k
+```
+
+am Access-Login vorbei, wenn jemand die Server-IP kennt. Entweder die Firewall
+auf die Cloudflare-IP-Bereiche einschränken — oder, einfacher, die BasicAuth
+aus dem Compose stehen lassen. Meldet Cloudflare Access an, liest die
+Oberfläche zusätzlich `Cf-Access-Authenticated-User-Email` und schreibt bei
+jeder Änderung mit, wer sie gemacht hat (`web.user_header` für andere Header).
+
+**Zertifikat per DNS-Challenge.** Der Router nutzt `certresolver: cfdns`, nicht
+`letsencrypt`. Sobald der DNS-Eintrag bei Cloudflare proxied ist (orange Wolke,
+Voraussetzung für Access), geht die HTTP-01-Challenge durch Cloudflare und wird
+unzuverlässig; die DNS-Challenge über `CF_DNS_API_TOKEN` nicht.
+
+An den Timeouts ist nichts zu drehen: Traefiks `writeTimeout` ist per Default
+`0`, und die 60 s `readTimeout` gelten für das *Lesen des Requests*. Die langen
+Antworten von Picker und Vorschau (30–90 s) laufen also durch.
+
+Ein Nebeneffekt von `traefik-net`: der Container hängt im selben Netz wie die
+anderen Dienste hinter dem Proxy, und webwatcher lädt beliebige URLs. Wer die
+Oberfläche bedienen kann, kann sie damit auf interne Dienste richten — was
+gegenüber dem `js:`-Feld (beliebiger Code) aber keine neue Eskalation ist.
+
+### Ohne Proxy, nur zum Ausprobieren
+
+```bash
+webwatcher run --web --web-host 127.0.0.1 --web-port 8080
+```
+
+Die vier Reiter im Editor:
+
+| Reiter | wofür |
+| --- | --- |
+| Einstellungen | alle Optionen als Formular, mit den Voreinstellungen als Platzhalter |
+| Auswählen | die Seite wird auf dem Server geladen, ein Klick ins Bild setzt den Selektor |
+| Verlauf | die letzten Prüfungen mit Dauer, HTTP-Status und Fehlern |
+| Inhalt | der Text, der tatsächlich verglichen wird, plus letzter Screenshot |
+
+**Vorschau prüfen** rendert die Seite zweimal hintereinander und zeigt, was sich
+zwischen zwei Läufen von allein ändert — Uhrzeiten, Zähler, wechselnde Banner.
+Genau das würde sonst bei jedem Intervall eine Meldung auslösen. Ein Klick
+übernimmt die Vorschläge als `ignore_patterns`.
 
 ## Lokal ausprobieren (ohne Docker)
 
@@ -266,7 +357,8 @@ Sieht der Bot die Nachricht nicht (Privacy-Modus), schreib `/start@dein_bot`.
 Screenshots werden nur **einmal** hochgeladen und an die weiteren Empfänger per
 Telegram-`file_id` verteilt. Und blockiert einer der Empfänger den Bot, bekommen
 die anderen ihre Meldung trotzdem — der Fehler landet nur im Log.
-## Config per Klick bauen: `webwatcher pick`
+
+## Seite per Klick anlegen: `webwatcher pick`
 
 Statt Selektoren aus den DevTools abzutippen:
 
@@ -277,7 +369,12 @@ webwatcher pick https://example.com/produkt/123 --name "Shop Produktseite" --int
 Es öffnet sich ein sichtbares Chromium – **mit denselben Einstellungen, die der
 Watcher später benutzt**. Fahre über die Seite, klicke das Element an, das
 beobachtet werden soll, schalte auf „Ignorieren" und klicke Werbung und Banner
-weg. Am Ende „Fertig", und der Block landet direkt in deiner `config.yaml`.
+weg. Am Ende „Fertig", und die Seite wird gespeichert.
+
+Das braucht einen Bildschirm, läuft also auf deinem Rechner, nicht auf dem
+Server. Auf dem Server macht der Reiter **Auswählen** in der
+[Weboberfläche](#weboberfläche) dasselbe – nur mit Screenshots statt eines
+echten Fensters.
 
 | Taste / Knopf | Wirkung |
 | --- | --- |
@@ -328,9 +425,9 @@ webwatcher pick https://intern.example.com/status --profile ./browser-profil
 Im Picker einloggen; die Session bleibt im Profilordner. Denselben Ordner auf
 den Server kopieren, dann nutzt der Watcher dieselbe Anmeldung.
 
-`pick` braucht einen Bildschirm, läuft also lokal, nicht auf dem Server. Der
-übliche Weg: lokal picken, den erzeugten Block in die Server-`config.yaml`
-kopieren (oder die Datei hochladen) und `docker compose restart`.
+Auf dem Server geht dasselbe ohne Profilordner über den Reiter **Auswählen** in
+der [Weboberfläche](#weboberfläche) — nur für Seiten hinter einem Login hilft
+der lokale Picker mit `--profile` weiter.
 
 ## Alternative: ohne Docker per systemd
 
@@ -357,24 +454,36 @@ journalctl -u webwatcher -f
 
 ## Konfiguration
 
-Alles in `config.yaml`. Werte unter `defaults:` gelten für alle Seiten und
-lassen sich pro Seite überschreiben. Secrets kommen per `${ENV_VAR}` rein.
+Zwei Orte, mit klarer Aufteilung:
+
+- **`config.yaml`** — Telegram, Speicher, `defaults:` für alle Seiten und die
+  Weboberfläche. Secrets kommen per `${ENV_VAR}` rein. Änderungen hier brauchen
+  einen Neustart (`docker compose restart`).
+- **Datenbank** — die beobachteten Seiten. Gepflegt über die Weboberfläche oder
+  `webwatcher pick`; Änderungen greifen sofort, ohne Neustart.
+
+Jede Option unten steht in beiden Welten zur Verfügung: unter `defaults:` als
+Vorgabe für alle Seiten, und pro Seite als Feld im Formular, das die Vorgabe
+überschreibt. Auch in der Datenbank bleibt `${ENV_VAR}` unaufgelöst stehen und
+wird erst beim Prüfen eingesetzt — ein Token landet also nie im Klartext dort.
+
+Als YAML sieht eine Seite so aus (das erzeugt `import-config` bzw. das Formular):
 
 ```yaml
-sites:
-  - name: Shop Produktseite
-    url: https://example.com/produkt/123
-    interval: 5m
-    selector: "#product-main"     # nur diesen Bereich vergleichen
-    wait_for: ".price"            # warten bis das Element da ist
-    ignore_selectors: [".ads", "#cookie-banner"]
-    ignore_patterns: ['\d+ Besucher online']
-    screenshot: full_page
+name: Shop Produktseite
+url: https://example.com/produkt/123
+interval: 5m
+selector: "#product-main"     # nur diesen Bereich vergleichen
+wait_for: ".price"            # warten bis das Element da ist
+ignore_selectors: [".ads", "#cookie-banner"]
+ignore_patterns: ['\d+ Besucher online']
+screenshot: full_page
 ```
 
 | Option | Default | Bedeutung |
 | --- | --- | --- |
 | `interval` | `15m` | Prüfabstand (`30s`, `5m`, `2h`, `1d`) |
+| `interval_windows` | `[]` | Zeitfenster mit engerem Takt, z.B. jede Minute rund um die Ticketfreigabe (siehe unten) |
 | `selector` | – | Nur dieser Bereich wird verglichen. Trifft der Selektor mehrere Elemente (z.B. `.produkt-karte`), werden **alle** verglichen |
 | `ignore_selectors` | `[]` | Elemente, die vor dem Vergleich entfernt werden |
 | `ignore_patterns` | `[]` | Regex; passende **Zeilen** fliegen raus |
@@ -390,6 +499,50 @@ sites:
 | `notify_on_error_after` | `3` | Erst nach N Fehlern in Folge alarmieren |
 | `block_resources` | `[]` | z.B. `[image, font, media]` — spart Traffic, wenn kein Screenshot nötig ist |
 | `enabled` | `true` | Seite pausieren, ohne sie zu löschen |
+
+### Enger takten, wenn etwas passiert
+
+Viele Seiten sind den ganzen Tag langweilig und für zehn Minuten spannend: neue
+Tickets kommen nachts um 1 ins System, Rückläufer werden gegen 9 freigegeben.
+Dauerhaft jede Minute zu prüfen wäre unhöflich und teuer — also nur dann:
+
+```yaml
+defaults:
+  interval: 15m                 # der normale Takt
+  interval_windows:
+    - from: "00:45"             # neue Kontingente
+      to: "01:30"
+      interval: 1m
+    - from: "08:45"             # Rückläufer, nur werktags
+      to: "09:30"
+      interval: 1m
+      days: [mo, di, mi, do, fr]
+```
+
+- **Uhrzeiten in Anführungszeichen.** YAML liest ein nacktes `9:30` als Zahl;
+  ohne Quotes gibt es dafür eine Fehlermeldung statt eines stillen Fehlers.
+- Gilt die **`timezone`** der Seite (Default `Europe/Berlin`), nicht UTC und
+  nicht die Serverzeit. Eine Zeitumstellung mitten im Fenster verschiebt es
+  nicht.
+- **`to` ist exklusiv**, und ein Fenster darf über Mitternacht gehen:
+  `from: "23:30"` / `to: "00:15"`. Mit `days` zählt dabei der Starttag — das
+  Fenster läuft in den nächsten Tag hinein.
+- **`days`** versteht `mo`–`so`, `mon`–`sun` und `montag`–`sonntag`. Ohne
+  `days` gilt das Fenster täglich.
+- Überlappen sich Fenster, **gewinnt das kürzeste Intervall**.
+- Unter `defaults:` gesetzt, gelten die Fenster für alle Seiten. Eine Seite
+  kann sie mit einer eigenen Liste ersetzen oder mit `interval_windows: []`
+  abschalten.
+
+Der Watcher wacht am Fensteranfang auf, statt den laufenden 15-Minuten-Takt
+abzuwarten: Beginnt um 08:45 ein Fenster, ist der nächste Check um 08:45 und
+nicht erst um 08:57. `webwatcher list` zeigt den Takt, der gerade gilt, mit
+`*` für „kommt aus einem Fenster"; `webwatcher -v list` zeigt alle Fenster.
+
+```
+KEY                       INTERVAL  LETZTER CHECK        STATUS
+kilmainham-gaol-august          1m* 2026-08-03 09:02:11  ok
+```
 
 ### Wenn der Zustand nur in der CSS-Klasse steckt
 
@@ -451,8 +604,10 @@ laufen lassen und schauen, was noch im Diff auftaucht.
 
 | Kommando | Zweck |
 | --- | --- |
-| `webwatcher pick <url>` | Elemente im Browser anklicken, Block in die Config schreiben |
+| `webwatcher pick <url>` | Elemente im Browser anklicken und als Seite speichern |
 | `webwatcher run` | Daemon; prüft jede Seite in ihrem Intervall |
+| `webwatcher run --web` | Daemon samt Weboberfläche (`--web-host`, `--web-port`) |
+| `webwatcher import-config` | `sites:` aus der config.yaml einmalig in die Datenbank holen |
 | `webwatcher check [seite...]` | Einmalig prüfen; `--no-notify`, `--show-diff` |
 | `webwatcher list` | Status aller Seiten |
 | `webwatcher history [seite] -n 50` | Letzte Checks |

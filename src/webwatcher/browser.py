@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from playwright.async_api import (
     Browser,
+    BrowserContext,
     Error as PlaywrightError,
     Page,
     Playwright,
@@ -142,10 +143,15 @@ class Renderer:
             self._browser = await self._playwright.chromium.launch(headless=True, args=LAUNCH_ARGS)
         return self._browser
 
-    async def render(self, site: SiteConfig) -> RenderResult:
-        started = time.monotonic()
-        browser = await self._ensure_browser()
+    async def new_context(self, site: SiteConfig, bypass_csp: bool = False) -> BrowserContext:
+        """A context configured exactly like a check would run it.
 
+        The web picker borrows this so what you click on is what the watcher
+        later sees - same viewport, same user agent, same headers. It needs
+        `bypass_csp` on top, because a strict policy would block the injected
+        selector script.
+        """
+        browser = await self._ensure_browser()
         context = await browser.new_context(
             viewport=site.viewport,
             user_agent=site.user_agent,
@@ -153,8 +159,14 @@ class Renderer:
             timezone_id=site.timezone,
             extra_http_headers=site.headers or None,
             ignore_https_errors=site.ignore_https_errors,
+            bypass_csp=bypass_csp,
         )
         context.set_default_timeout(site.timeout_ms)
+        return context
+
+    async def render(self, site: SiteConfig) -> RenderResult:
+        started = time.monotonic()
+        context = await self.new_context(site)
 
         try:
             if site.block_resources:

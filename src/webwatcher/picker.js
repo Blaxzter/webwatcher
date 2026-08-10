@@ -1,102 +1,15 @@
 /* webwatcher element picker - injected into the page by `webwatcher pick`.
- * Talks to Python through the bindings exposed by picker.py (__wwPick, ...). */
+ * Talks to Python through the bindings exposed by picker.py (__wwPick, ...).
+ * The selector logic lives in selector.js, which picker.py injects first. */
 (() => {
   if (window.top !== window) return; // main frame only
   if (window.__wwPickerLoaded) return;
+  if (!window.__wwBuildSelector) return; // selector.js missing - nothing to build on
   window.__wwPickerLoaded = true;
 
-  // ---------------------------------------------------------------- selectors
-
-  // Reject generated names: css-1a2b3c, jsx-1234567, item_98765, ...
-  const UNSTABLE_TOKEN = /(^|[-_])(\d{3,}|[0-9a-f]{6,})([-_]|$)/i;
-  const UNSTABLE_CLASS = /^(is-|has-|js-|ng-|_)|(active|hover|focus|selected|open|show|hidden|current)$/i;
-
-  const isUnique = (selector) => {
-    try {
-      return document.querySelectorAll(selector).length === 1;
-    } catch {
-      return false;
-    }
-  };
-
-  const stableClasses = (el) =>
-    Array.from(el.classList)
-      .filter((c) => c.length > 1 && !UNSTABLE_TOKEN.test(c) && !UNSTABLE_CLASS.test(c))
-      .slice(0, 3);
-
-  /* Best selector for one element, ignoring its ancestors. */
-  function partFor(el) {
-    const tag = el.tagName.toLowerCase();
-
-    if (el.id && !UNSTABLE_TOKEN.test(el.id)) {
-      const sel = '#' + CSS.escape(el.id);
-      if (isUnique(sel)) return { sel, unique: true };
-    }
-
-    for (const attr of ['data-testid', 'data-test-id', 'data-qa', 'data-test', 'itemprop', 'name']) {
-      const value = el.getAttribute(attr);
-      if (value && !UNSTABLE_TOKEN.test(value)) {
-        const sel = `${tag}[${attr}="${value.replace(/["\\]/g, '\\$&')}"]`;
-        if (isUnique(sel)) return { sel, unique: true };
-      }
-    }
-
-    const sel = tag + stableClasses(el).map((c) => '.' + CSS.escape(c)).join('');
-    return { sel, unique: isUnique(sel) };
-  }
-
-  /* Walk up until the accumulated path is unique in the document. */
-  function buildSelector(el) {
-    const direct = partFor(el);
-    if (direct.unique) return direct.sel;
-
-    const parts = [];
-    let node = el;
-    while (node && node.nodeType === 1 && node !== document.documentElement) {
-      let part = partFor(node).sel;
-      const parent = node.parentElement;
-      if (parent) {
-        let siblings = 0;
-        for (const child of parent.children) {
-          try {
-            if (child.matches(part)) siblings++;
-          } catch {
-            /* ignore */
-          }
-        }
-        if (siblings > 1) {
-          part += `:nth-child(${Array.prototype.indexOf.call(parent.children, node) + 1})`;
-        }
-      }
-      parts.unshift(part);
-      const candidate = parts.join(' > ');
-      if (isUnique(candidate)) return candidate;
-      if (!parent || parent === document.body) break;
-      node = parent;
-    }
-    return parts.join(' > ');
-  }
-
-  const countFor = (selector) => {
-    try {
-      return document.querySelectorAll(selector).length;
-    } catch {
-      return 0;
-    }
-  };
-
-  /* Purely class based, ignoring id/data attributes and position, so it
-   * deliberately matches every sibling of the same kind (list items, cards, ...). */
-  function broadSelector(el) {
-    const classes = stableClasses(el);
-    if (!classes.length) return null;
-    const sel = el.tagName.toLowerCase() + classes.map((c) => '.' + CSS.escape(c)).join('');
-    return countFor(sel) ? sel : null;
-  }
-
-  // Exposed for `webwatcher pick --headless` tests and for debugging in DevTools.
-  window.__wwBuildSelector = buildSelector;
-  window.__wwBroadSelector = broadSelector;
+  const buildSelector = window.__wwBuildSelector;
+  const broadSelector = window.__wwBroadSelector;
+  const countFor = window.__wwCountFor;
 
   // ---------------------------------------------------------------------- ui
 

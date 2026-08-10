@@ -21,9 +21,36 @@ storage:
 concurrency: 2 # wie viele Seiten parallel geprüft werden
 jitter: 5s # zufällige Streuung, damit nicht alles gleichzeitig läuft
 
+# Web-Oberfläche zum Pflegen der Seiten (webwatcher run --web).
+# ACHTUNG: bringt keine eigene Anmeldung mit. Sie gehört hinter einen Reverse
+# Proxy, der das übernimmt (Traefik + Cloudflare Access o.ä.), oder auf
+# host: 127.0.0.1. Im Container ist 0.0.0.0 richtig, solange docker-compose
+# keinen Port auf den Host veröffentlicht - siehe README.
+web:
+    enabled: ${WEBWATCHER_WEB:-false}
+    host: 0.0.0.0
+    port: 8080
+    # Aus diesem Header liest das UI, wer gerade etwas ändert (nur fürs Protokoll).
+    user_header: Cf-Access-Authenticated-User-Email
+
 # Gilt für alle Seiten und kann pro Seite überschrieben werden.
 defaults:
     interval: 15m
+    # Zeitfenster mit engerem Takt. Uhrzeiten in Anführungszeichen (YAML liest
+    # 9:30 sonst als Zahl) und in der 'timezone' weiter unten. 'to' ist
+    # exklusiv, über Mitternacht geht ("23:30" -> "00:15").
+    # Optional 'days: [mo, di, ...]' (auch mon..sun); ohne days: jeden Tag.
+    # Überlappen sich Fenster, gewinnt das kürzeste Intervall.
+    interval_windows: []
+    # Beispiel: nachts um 1 kommen die neuen Tickets, morgens um 9 die
+    # Rückläufer - in diesen Fenstern jede Minute statt alle 15.
+    #   interval_windows:
+    #     - from: "00:45"
+    #       to: "01:30"
+    #       interval: 1m
+    #     - from: "08:45"
+    #       to: "09:30"
+    #       interval: 1m
     wait_until: networkidle # load | domcontentloaded | networkidle | commit
     timeout: 30s
     settle: 0s # zusätzliche Wartezeit nach dem Laden
@@ -40,6 +67,10 @@ defaults:
     max_diff_lines: 60 # Diff in der Nachricht kürzen
     notify_first_check: true # Meldung beim Anlegen der Baseline
 
+# Die beobachteten Seiten liegen in der Datenbank, nicht hier - gepflegt werden
+# sie im Web-UI oder mit `webwatcher pick`. Dieser Block ist nur noch Saatgut:
+# `webwatcher import-config` übernimmt ihn einmalig, danach wird er ignoriert
+# und kann weg. Die Beispiele darunter zeigen weiter, was pro Seite geht.
 sites:
     # Minimalfall: ganze Seite beobachten
     - name: Beispiel
@@ -85,11 +116,21 @@ sites:
       # # Zustand steckt nur in der CSS-Klasse (Ticketkalender: die Tageszahl
       # # bleibt gleich, nur daySoldOut -> dayAvail wechselt). Ohne
       # # track_attributes wäre das im Textvergleich unsichtbar.
+      # # Die interval_windows hier gelten nur für diese Seite und ersetzen
+      # # die aus 'defaults' (leere Liste = wieder nur das feste Intervall).
       # - name: Tickets August
       #   url: https://beispiel.de/kalender
       #   interval: 15m
       #   selector: div.calendar
       #   track_attributes: [class]
+      #   interval_windows:
+      #     - from: "00:45" # neue Kontingente
+      #       to: "01:30"
+      #       interval: 1m
+      #     - from: "08:45" # Rückläufer, nur werktags
+      #       to: "09:30"
+      #       interval: 1m
+      #       days: [mo, di, mi, do, fr]
 
       # # Nur HTML-Struktur vergleichen (erkennt auch Änderungen an Links/Attributen)
       # - name: Downloads

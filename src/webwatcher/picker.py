@@ -23,7 +23,14 @@ from webwatcher.config import ConfigError, SiteConfig, site_from_mapping
 
 log = logging.getLogger(__name__)
 
+SELECTOR_JS = Path(__file__).with_name("selector.js")
 PICKER_JS = Path(__file__).with_name("picker.js")
+
+
+def picker_script() -> str:
+    """selector.js first - picker.js bails out if the builders are missing."""
+    return SELECTOR_JS.read_text(encoding="utf-8") + "\n" + PICKER_JS.read_text(encoding="utf-8")
+
 
 _DIGIT_RUN = re.compile(r"\d+")
 _ESCAPED_SPACE = re.compile(r"\\(\s)")
@@ -44,6 +51,35 @@ def suggest_pattern(line: str) -> str:
     # re.escape also escapes spaces; harmless but unreadable in a config file.
     escaped = _ESCAPED_SPACE.sub(r"\1", escaped)
     return _DIGIT_RUN.sub(r"\\d+", escaped)
+
+
+async def stability_preview(renderer: Renderer, site: SiteConfig) -> dict[str, Any]:
+    """Render twice headless and report the content plus anything that moved.
+
+    Two renders a few seconds apart are the cheapest way to catch the things
+    that would otherwise fire a notification every single interval: clocks,
+    session ids, rotating banners. Shared by the CLI picker and the web UI.
+    """
+    try:
+        first = await renderer.render(site)
+        second = await renderer.render(site)
+    except Exception as exc:  # noqa: BLE001 - surfaced in the panel
+        return {"ok": False, "error": str(exc).strip().splitlines()[0][:300]}
+
+    lines = normalize(first.text, site.ignore_patterns)
+    later = normalize(second.text, site.ignore_patterns)
+    diff = make_diff(lines, later, 20)
+    unstable = sorted({entry[2:] for entry in diff.text.splitlines() if entry[:1] in "+-"})
+
+    return {
+        "ok": True,
+        "count": len(lines),
+        "chars": sum(len(entry) for entry in lines),
+        "sample": lines[:25],
+        "unstable": unstable[:12],
+        "suggestions": [suggest_pattern(entry) for entry in unstable[:12]],
+        "matches": first.match_count,
+    }
 
 
 @dataclass
@@ -157,7 +193,7 @@ class PickerSession:
         ):
             await self._context.expose_function(name, handler)
 
-        script = PICKER_JS.read_text(encoding="utf-8")
+        script = picker_script()
         await self._context.add_init_script(script)
 
         page = self._context.pages[0] if self._context.pages else await self._context.new_page()
@@ -225,7 +261,6 @@ class PickerSession:
         return self.state.as_dict()
 
     async def _on_preview(self) -> dict[str, Any]:
-        """Render twice headless and report content plus anything that moved."""
         try:
             site = self._temp_site()
         except ConfigError as exc:
@@ -235,26 +270,9 @@ class PickerSession:
             self._preview_renderer = Renderer(playwright=self._playwright)
             await self._preview_renderer.start()
 
-        try:
-            first = await self._preview_renderer.render(site)
-            second = await self._preview_renderer.render(site)
-        except Exception as exc:  # noqa: BLE001 - surfaced in the panel
-            return {"ok": False, "error": str(exc).strip().splitlines()[0][:300]}
-
-        lines = normalize(first.text, site.ignore_patterns)
-        later = normalize(second.text, site.ignore_patterns)
-        diff = make_diff(lines, later, 20)
-        unstable = sorted({entry[2:] for entry in diff.text.splitlines() if entry[:1] in "+-"})
-        self._last_suggestions = [suggest_pattern(entry) for entry in unstable[:12]]
-
-        return {
-            "ok": True,
-            "count": len(lines),
-            "chars": sum(len(entry) for entry in lines),
-            "sample": lines[:25],
-            "unstable": unstable[:12],
-            "matches": first.match_count,
-        }
+        result = await stability_preview(self._preview_renderer, site)
+        self._last_suggestions = list(result.get("suggestions") or [])
+        return result
 
     def _temp_site(self) -> SiteConfig:
         # The preview only compares text; skipping the screenshot keeps it snappy.
@@ -264,48 +282,12 @@ class PickerSession:
 # -- orchestration ----------------------------------------------------------
 
 
-def find_sites_indent(text: str) -> int | None:
-    """Indentation of the existing `sites:` list items, so appends line up."""
-    in_sites = False
-    for line in text.splitlines():
-        if re.match(r"^sites\s*:", line):
-            in_sites = True
-            continue
-        if in_sites:
-            if re.match(r"^\S", line):  # next top level key -> list ended
-                break
-            match = re.match(r"^(\s*)-\s", line)
-            if match:
-                return len(match.group(1))
-    return None if not in_sites else 2
-
-
-def append_site(config_path: Path, block: str) -> tuple[bool, str]:
-    """Append a site block, but only if the file still parses and gained the entry."""
-    original = config_path.read_text(encoding="utf-8")
-    candidate = original.rstrip("\n") + "\n" + block
-
-    try:
-        before = yaml.safe_load(original) or {}
-        after = yaml.safe_load(candidate) or {}
-    except yaml.YAMLError as exc:
-        return False, f"Ergebnis wäre kein gültiges YAML: {exc}"
-
-    old_sites = before.get("sites") or []
-    new_sites = after.get("sites") or []
-    if not isinstance(new_sites, list) or len(new_sites) != len(old_sites) + 1:
-        return False, "Der Block hätte sich nicht sauber in die sites-Liste eingefügt."
-
-    config_path.write_text(candidate, encoding="utf-8")
-    return True, ""
-
-
 async def run_picker(
     url: str,
     *,
     name: str | None,
     interval: str,
-    config,
+    repo,
     profile: Path | None,
     write: bool,
     headless: bool = False,
@@ -339,24 +321,18 @@ async def run_picker(
         print("Abgebrochen, nichts geschrieben.")
         return 1
 
-    block = state.as_yaml_block(indent=2)
-    print("\n" + block)
+    print("\n" + state.as_yaml_block(indent=2))
 
-    target = getattr(config, "source_path", None) if config else None
-    if not write or target is None:
-        if target is None and write:
-            print("Keine nutzbare config.yaml gefunden - Block bitte selbst einfügen.")
+    if not write or repo is None:
+        if repo is None and write:
+            print("Keine nutzbare Datenbank gefunden - die Seite wurde nicht gespeichert.")
         return 0
 
-    indent = find_sites_indent(target.read_text(encoding="utf-8"))
-    if indent is None:
-        print(f"In {target} fehlt ein 'sites:'-Block - bitte manuell einfügen.")
-        return 0
+    try:
+        entry = repo.save(state.as_site_mapping(), actor="pick")
+    except ConfigError as exc:
+        print(f"Nicht gespeichert: {exc}")
+        return 1
 
-    ok, error = append_site(target, state.as_yaml_block(indent=indent))
-    if not ok:
-        print(f"Nicht automatisch eingefügt ({error})\nBitte den Block oben selbst einfügen.")
-        return 0
-
-    print(f"An {target} angehängt.")
+    print(f"Gespeichert als {entry.key!r}. Der laufende Daemon übernimmt sie beim nächsten Takt.")
     return 0

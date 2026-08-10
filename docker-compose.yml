@@ -8,6 +8,8 @@ services:
     # Chromium bricht sonst gern mit "Target closed" ab.
     shm_size: "1gb"
     volumes:
+      # Bleibt read-only: die beobachteten Seiten liegen in der Datenbank,
+      # hier stehen nur Telegram, Speicher und Defaults.
       - ./config.yaml:/app/config.yaml:ro
       # Named Volume: Docker legt es mit den Rechten des Container-Users an.
       # Ein Bind-Mount (./data:/app/data) würde root gehören und der Container
@@ -19,5 +21,39 @@ services:
         max-size: "10m"
         max-file: "3"
 
+    # -- Web-UI --------------------------------------------------------------
+    # Einschalten mit WEBWATCHER_WEB=true in der .env (siehe config.example.yaml).
+    # Bewusst kein `ports:`: das UI kennt keine eigene Anmeldung und darf nicht
+    # am Host hängen. Traefik erreicht es über traefik-net.
+    expose:
+      - "8080"
+    networks:
+      - default
+      - traefik-net
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-net
+      traefik.http.routers.webwatcher.rule: Host(`webwatcher.fabraham.dev`)
+      traefik.http.routers.webwatcher.entrypoints: websecure
+      # DNS-Challenge statt HTTP-01: nötig, sobald der DNS-Eintrag bei
+      # Cloudflare proxied ist (orange Wolke) - und das ist er, wenn
+      # Cloudflare Access davor liegen soll.
+      traefik.http.routers.webwatcher.tls.certresolver: cfdns
+      traefik.http.services.webwatcher.loadbalancer.server.port: "8080"
+
+      # BasicAuth als zweite Schicht - siehe README. Cloudflare Access allein
+      # reicht nicht: wer die Server-IP kennt, kommt mit passendem Host-Header
+      # direkt an Traefik vorbei am Access-Login vorbei.
+      # Hash erzeugen: htpasswd -nB benutzername
+      # In der .env in einfache Anführungszeichen setzen, sonst schneidet
+      # Compose den bcrypt-Hash still ab (siehe .env.example).
+      traefik.http.middlewares.webwatcher-auth.basicauth.users: ${WEBWATCHER_AUTH}
+      traefik.http.routers.webwatcher.middlewares: webwatcher-auth
+
 volumes:
   webwatcher-data:
+
+networks:
+  # Das Netz aus dem Traefik-Compose (dort `name: traefik-net`).
+  traefik-net:
+    external: true

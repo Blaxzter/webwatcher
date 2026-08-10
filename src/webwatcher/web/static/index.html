@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>webwatcher</title>
+  <link rel="stylesheet" href="static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>👀</text></svg>">
+</head>
+<body>
+  <header id="top">
+    <h1>webwatcher</h1>
+    <div class="grow"></div>
+    <span id="telegram" class="chip" title="Telegram"></span>
+    <span id="user" class="chip"></span>
+    <button id="add">Neue Seite</button>
+  </header>
+
+  <main id="list-view">
+    <div id="sites"></div>
+    <p id="empty" class="empty" hidden>
+      Noch keine Seite eingerichtet. <b>Neue Seite</b> anlegen – im Reiter
+      <b>Auswählen</b> lässt sich der Bereich direkt auf der Seite anklicken.
+    </p>
+  </main>
+
+  <!-- Editor: Einstellungen, Picker, Verlauf, Inhalt -->
+  <div id="editor" class="overlay" hidden>
+    <div class="sheet">
+      <header class="sheet-head">
+        <strong id="editor-title">Seite</strong>
+        <nav class="tabs">
+          <button data-tab="settings" class="on">Einstellungen</button>
+          <button data-tab="picker">Auswählen</button>
+          <button data-tab="history">Verlauf</button>
+          <button data-tab="content">Inhalt</button>
+        </nav>
+        <div class="grow"></div>
+        <button id="editor-close" class="ghost" title="Schließen">✕</button>
+      </header>
+
+      <div id="editor-error" class="banner err" hidden></div>
+
+      <section data-panel="settings" class="panel"><div id="form"></div></section>
+
+      <section data-panel="picker" class="panel" hidden>
+        <div class="picker-bar">
+          <button id="pick-start" class="primary">Seite laden</button>
+          <div class="seg">
+            <button id="pick-watch" class="on">Beobachten</button>
+            <button id="pick-ignore">Ignorieren</button>
+          </div>
+          <label class="check"><input type="checkbox" id="pick-broad"> alle gleichartigen</label>
+          <button id="pick-reload" class="ghost" hidden>Neu laden</button>
+          <button id="pick-stop" class="ghost" hidden>Beenden</button>
+          <div class="grow"></div>
+          <span id="pick-status" class="muted"></span>
+        </div>
+        <div id="pick-current" class="picked" hidden></div>
+        <div id="pick-stage" class="stage" hidden>
+          <div class="stage-inner">
+            <img id="pick-img" alt="Seitenvorschau">
+            <div id="pick-overlay"></div>
+          </div>
+          <input type="range" id="pick-scroll" min="0" max="0" value="0" orient="vertical">
+        </div>
+        <div id="pick-hint" class="empty">
+          <b>Seite laden</b> öffnet die URL auf dem Server – im selben Chromium, mit
+          denselben Einstellungen, mit denen später geprüft wird. Ein Klick ins Bild
+          übernimmt den Bereich.
+        </div>
+      </section>
+
+      <section data-panel="history" class="panel" hidden><div id="history"></div></section>
+
+      <section data-panel="content" class="panel" hidden>
+        <div class="row">
+          <button id="content-reload" class="ghost">Neu laden</button>
+          <span class="muted">Das ist der Text, der beim nächsten Lauf verglichen wird.</span>
+        </div>
+        <pre id="content"></pre>
+      </section>
+
+      <footer class="sheet-foot">
+        <button id="preview" class="ghost">Vorschau prüfen</button>
+        <div class="grow"></div>
+        <span id="editor-hint" class="muted"></span>
+        <button id="editor-cancel" class="ghost">Abbrechen</button>
+        <button id="save" class="primary">Speichern</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="static/app.js"></script>
+</body>
+</html>

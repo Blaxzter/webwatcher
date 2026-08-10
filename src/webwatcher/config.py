@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from functools import cache
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -37,13 +40,28 @@ RESOURCE_TYPES = {
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?\s*$", re.IGNORECASE)
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_CLOCK_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 
 _UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+MINUTES_PER_DAY = 1440
+DAY_NAMES = ("Mo", "Di", "Mi", "Do", "Fr", "Sa", "So")
+_WEEKDAYS = {
+    "mon": 0, "monday": 0, "mo": 0, "montag": 0,
+    "tue": 1, "tuesday": 1, "di": 1, "dienstag": 1,
+    "wed": 2, "wednesday": 2, "mi": 2, "mittwoch": 2,
+    "thu": 3, "thursday": 3, "do": 3, "donnerstag": 3,
+    "fri": 4, "friday": 4, "fr": 4, "freitag": 4,
+    "sat": 5, "saturday": 5, "sa": 5, "samstag": 5,
+    "sun": 6, "sunday": 6, "so": 6, "sonntag": 6,
+}  # fmt: skip
 
 # Site-level knobs and their fallbacks. Anything listed here can be set globally
 # under `defaults:` and overridden per site.
 SITE_DEFAULTS: dict[str, Any] = {
     "interval": "15m",
+    # Zeitfenster mit abweichendem (meist engerem) Takt, siehe _build_windows.
+    "interval_windows": [],
     "mode": "text",
     "selector": None,
     "ignore_selectors": [],
@@ -76,12 +94,87 @@ class ConfigError(RuntimeError):
     """Raised for any malformed or missing configuration value."""
 
 
+@cache
+def _zone(name: str) -> tzinfo:
+    """Resolve a timezone name; unknown ones fall back to UTC (validated at load)."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def _clock(minute_of_day: int) -> str:
+    hour, minute = divmod(minute_of_day, 60)
+    return f"{hour:02d}:{minute:02d}"
+
+
+@dataclass(frozen=True)
+class IntervalWindow:
+    """A recurring time-of-day window with its own check interval.
+
+    Times are wall clock in the site's `timezone`, `end` is exclusive and a
+    window may wrap around midnight (23:30 -> 00:30). With `days` set, the
+    *start* day decides - a wrapping window keeps running into the next day.
+    """
+
+    start_minute: int
+    end_minute: int
+    interval_seconds: float
+    days: frozenset[int] = frozenset()  # empty = every day
+
+    @property
+    def wraps_midnight(self) -> bool:
+        return self.end_minute <= self.start_minute
+
+    @property
+    def label(self) -> str:
+        days = ",".join(DAY_NAMES[day] for day in sorted(self.days))
+        span = f"{_clock(self.start_minute)}-{_clock(self.end_minute)}"
+        return f"{days} {span}" if days else span
+
+    def describe(self) -> str:
+        return f"{self.label} -> {format_duration(self.interval_seconds)}"
+
+    def _day_matches(self, day: date) -> bool:
+        return not self.days or day.weekday() in self.days
+
+    def contains(self, local: datetime) -> bool:
+        """`local` must already be in the site's timezone."""
+        minute = local.hour * 60 + local.minute
+        if not self.wraps_midnight:
+            return self.start_minute <= minute < self.end_minute and self._day_matches(local.date())
+        if minute >= self.start_minute:
+            return self._day_matches(local.date())
+        if minute < self.end_minute:
+            return self._day_matches(local.date() - timedelta(days=1))
+        return False
+
+    def boundaries(self, local: datetime, zone: tzinfo) -> list[datetime]:
+        """Every start/end around `local` (yesterday .. a week ahead).
+
+        Built from wall clock dates rather than by adding a duration, so a DST
+        switch inside a window does not shift its end by an hour.
+        """
+        start_time = time(*divmod(self.start_minute, 60))
+        end_time = time(*divmod(self.end_minute, 60))
+        result: list[datetime] = []
+        for offset in range(-1, 8):
+            day = local.date() + timedelta(days=offset)
+            if not self._day_matches(day):
+                continue
+            end_day = day + timedelta(days=1) if self.wraps_midnight else day
+            result.append(datetime.combine(day, start_time, tzinfo=zone))
+            result.append(datetime.combine(end_day, end_time, tzinfo=zone))
+        return result
+
+
 @dataclass(frozen=True)
 class SiteConfig:
     key: str
     name: str
     url: str
     interval_seconds: float
+    interval_windows: tuple[IntervalWindow, ...]
     mode: str
     selector: str | None
     ignore_selectors: list[str]
@@ -106,6 +199,32 @@ class SiteConfig:
     notify_first_check: bool
     enabled: bool
 
+    def active_window(self, moment: datetime) -> IntervalWindow | None:
+        """The window in force at `moment` (UTC). Overlapping: the faster one wins."""
+        if not self.interval_windows:
+            return None
+        local = moment.astimezone(_zone(self.timezone))
+        matching = [w for w in self.interval_windows if w.contains(local)]
+        return min(matching, key=lambda w: w.interval_seconds) if matching else None
+
+    def interval_at(self, moment: datetime) -> float:
+        window = self.active_window(moment)
+        return window.interval_seconds if window else self.interval_seconds
+
+    def next_window_change(self, moment: datetime) -> datetime | None:
+        """When the effective interval changes next, i.e. a window starts or ends."""
+        if not self.interval_windows:
+            return None
+        zone = _zone(self.timezone)
+        local = moment.astimezone(zone)
+        upcoming = [
+            edge
+            for window in self.interval_windows
+            for edge in window.boundaries(local, zone)
+            if edge > local
+        ]
+        return min(upcoming).astimezone(timezone.utc) if upcoming else None
+
 
 @dataclass(frozen=True)
 class TelegramConfig:
@@ -124,6 +243,24 @@ class TelegramConfig:
         return bool(self.bot_token and self.chat_ids)
 
 
+@dataclass(frozen=True)
+class WebConfig:
+    """Das Web-UI. Läuft im selben Prozess wie der Daemon.
+
+    Es bringt bewusst keine eigene Authentifizierung mit: gedacht ist der
+    Betrieb hinter einem Reverse Proxy (Traefik, Cloudflare Access, ...), der
+    das übernimmt. `host` deshalb nur auf eine Adresse legen, die nicht offen
+    im Netz steht - im Container ist 0.0.0.0 richtig, solange docker-compose
+    keinen Port auf den Host veröffentlicht.
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"  # noqa: S104 - siehe Docstring
+    port: int = 8080
+    # Woraus das UI ableitet, wer gerade etwas ändert (nur fürs Protokoll).
+    user_header: str = "Cf-Access-Authenticated-User-Email"
+
+
 @dataclass
 class Config:
     sites: list[SiteConfig]
@@ -135,10 +272,21 @@ class Config:
     concurrency: int = 2
     jitter_seconds: float = 5.0
     source_path: Path | None = None
+    web: WebConfig = field(default_factory=WebConfig)
+    # Die zusammengeführten `defaults:` - das Repository braucht sie, um die
+    # Mappings aus der Datenbank genauso aufzubauen wie die aus der YAML.
+    site_defaults: dict[str, Any] = field(default_factory=lambda: dict(SITE_DEFAULTS))
+    # Roher, ungeprüfter `sites:`-Block aus der YAML - nur für `import-config`.
+    seed_sites: list[Any] = field(default_factory=list)
     _by_key: dict[str, SiteConfig] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self._by_key = {site.key: site for site in self.sites}
+
+    def replace_sites(self, sites: list[SiteConfig]) -> None:
+        """Die Seiten kommen im Normalfall aus der Datenbank, nicht aus der YAML."""
+        self.sites = sites
+        self._by_key = {site.key: site for site in sites}
 
     def get_site(self, name_or_key: str) -> SiteConfig | None:
         needle = name_or_key.strip()
@@ -167,6 +315,81 @@ def parse_duration(value: Any, where: str) -> float:
     amount = float(match.group(1))
     unit = (match.group(2) or "s").lower()
     return amount * _UNIT_SECONDS[unit]
+
+
+def format_duration(seconds: float) -> str:
+    """Inverse of parse_duration for display: 90 -> '1.5m'."""
+    for limit, unit, factor in ((60, "s", 1), (3600, "m", 60), (86400, "h", 3600)):
+        if seconds < limit:
+            return f"{seconds / factor:g}{unit}"
+    return f"{seconds / 86400:g}d"
+
+
+def parse_clock(value: Any, where: str) -> int:
+    """'09:30' -> minutes since midnight. '24:00' means midnight, end of day."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # YAML 1.1 reads an unquoted 9:30 as the number 570 (sexagesimal).
+        raise ConfigError(f'{where}: put the time in quotes, e.g. "09:30"')
+    match = _CLOCK_RE.match(str(value))
+    if not match:
+        raise ConfigError(f'{where}: invalid time {value!r} (use "HH:MM", e.g. "08:45")')
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if (hour, minute) == (24, 0):
+        return 0
+    if hour > 23 or minute > 59:
+        raise ConfigError(f"{where}: invalid time {value!r} (00:00 - 23:59)")
+    return hour * 60 + minute
+
+
+def _parse_days(value: Any, where: str) -> frozenset[int]:
+    days: set[int] = set()
+    for item in _as_str_list(value, where):
+        for part in item.split(","):
+            name = part.strip().lower()
+            if not name:
+                continue
+            if name not in _WEEKDAYS:
+                raise ConfigError(
+                    f"{where}: unknown weekday {name!r} (mon..sun, mo..so or montag..sonntag)"
+                )
+            days.add(_WEEKDAYS[name])
+    return frozenset(days)
+
+
+def _build_windows(raw: Any, where: str) -> tuple[IntervalWindow, ...]:
+    """Parse `interval_windows: [{from, to, interval, days?}, ...]`."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}: expected a list of {{from, to, interval}} mappings")
+
+    windows: list[IntervalWindow] = []
+    for index, item in enumerate(raw):
+        spot = f"{where}[{index}]"
+        if not isinstance(item, dict):
+            raise ConfigError(f"{spot}: expected a mapping with from/to/interval")
+        unknown = set(item) - {"from", "to", "interval", "days"}
+        if unknown:
+            raise ConfigError(f"{spot}: unknown option(s): {sorted(unknown)}")
+        for required in ("from", "to", "interval"):
+            if item.get(required) is None:
+                raise ConfigError(f"{spot}: {required!r} is required")
+
+        start = parse_clock(item["from"], f"{spot}.from")
+        end = parse_clock(item["to"], f"{spot}.to")
+        if start == end:
+            raise ConfigError(
+                f"{spot}: 'from' and 'to' are identical ({item['from']!r}), the window is empty"
+            )
+        windows.append(
+            IntervalWindow(
+                start_minute=start,
+                end_minute=end,
+                interval_seconds=max(5.0, parse_duration(item["interval"], f"{spot}.interval")),
+                days=_parse_days(item.get("days"), f"{spot}.days"),
+            )
+        )
+    return tuple(windows)
 
 
 def _expand_env(node: Any) -> Any:
@@ -269,11 +492,20 @@ def _build_site(raw: dict[str, Any], defaults: dict[str, Any], index: int) -> Si
 
     key = str(raw.get("key") or _slugify(name))
 
+    windows = _build_windows(merged.get("interval_windows"), f"{where}.interval_windows")
+    timezone_name = str(merged.get("timezone"))
+    if windows and _zone(timezone_name) is timezone.utc and timezone_name.upper() != "UTC":
+        raise ConfigError(
+            f"{where}.timezone: unknown timezone {timezone_name!r} - interval_windows are read "
+            "in that timezone, so this has to resolve (on Windows: pip install tzdata)"
+        )
+
     return SiteConfig(
         key=key,
         name=name,
         url=url,
         interval_seconds=max(5.0, parse_duration(merged.get("interval"), f"{where}.interval")),
+        interval_windows=windows,
         mode=_one_of(merged.get("mode"), MODE_VALUES, f"{where}.mode"),
         selector=selector,
         ignore_selectors=_as_str_list(merged.get("ignore_selectors"), f"{where}.ignore_selectors"),
@@ -350,13 +582,20 @@ def load_config(path: str | Path) -> Config:
         )
 
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        document = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{config_path}: invalid YAML: {exc}") from None
-    if not isinstance(raw, dict):
+    if not isinstance(document, dict):
         raise ConfigError(f"{config_path}: top level must be a mapping")
 
-    raw = _expand_env(raw)
+    # Ein `sites:`-Block ist nur noch Saatgut für `import-config` - die Seiten
+    # selbst leben in der Datenbank. Bewusst *vor* _expand_env abgegriffen:
+    # so wandert `${TOKEN}` als `${TOKEN}` in die Datenbank und nicht der Token.
+    seed_sites = document.get("sites") or []
+    if not isinstance(seed_sites, list):
+        raise ConfigError("sites: expected a list")
+
+    raw = _expand_env(document)
 
     defaults = dict(SITE_DEFAULTS)
     user_defaults = raw.get("defaults") or {}
@@ -366,26 +605,6 @@ def load_config(path: str | Path) -> Config:
     if unknown:
         raise ConfigError(f"defaults: unknown option(s): {sorted(unknown)}")
     defaults.update({k: v for k, v in user_defaults.items() if v is not None})
-
-    # An empty `sites:` is the legitimate starting point - `webwatcher pick` fills it.
-    # A missing key is almost always a typo, so that stays an error.
-    if "sites" not in raw:
-        raise ConfigError(
-            "Die Konfiguration hat keinen 'sites:'-Block (Vorlage: config.example.yaml)"
-        )
-    sites_raw = raw.get("sites") or []
-    if not isinstance(sites_raw, list):
-        raise ConfigError("sites: expected a list")
-    sites = [_build_site(item, defaults, i) for i, item in enumerate(sites_raw)]
-
-    seen: dict[str, str] = {}
-    for site in sites:
-        if site.key in seen:
-            raise ConfigError(
-                f"duplicate site key {site.key!r} (used by {seen[site.key]!r} and {site.name!r}); "
-                "give one of them an explicit 'key:'"
-            )
-        seen[site.key] = site.name
 
     telegram_raw = raw.get("telegram") or {}
     if not isinstance(telegram_raw, dict):
@@ -399,6 +618,19 @@ def load_config(path: str | Path) -> Config:
         silent=_as_bool(telegram_raw.get("silent", False), "telegram.silent"),
     )
 
+    web_raw = raw.get("web") or {}
+    if not isinstance(web_raw, dict):
+        raise ConfigError("web: expected a mapping")
+    unknown_web = set(web_raw) - {"enabled", "host", "port", "user_header"}
+    if unknown_web:
+        raise ConfigError(f"web: unknown option(s): {sorted(unknown_web)}")
+    web = WebConfig(
+        enabled=_as_bool(web_raw.get("enabled", False), "web.enabled"),
+        host=str(web_raw.get("host") or "0.0.0.0"),  # noqa: S104 - siehe WebConfig
+        port=_as_int(web_raw.get("port", 8080), "web.port", 1),
+        user_header=str(web_raw.get("user_header") or "Cf-Access-Authenticated-User-Email"),
+    )
+
     storage = raw.get("storage") or {}
     if not isinstance(storage, dict):
         raise ConfigError("storage: expected a mapping")
@@ -407,7 +639,7 @@ def load_config(path: str | Path) -> Config:
     screenshot_dir = Path(str(storage.get("screenshot_dir") or "data/screenshots")).expanduser()
 
     return Config(
-        sites=sites,
+        sites=[],  # kommen aus der Datenbank, siehe cli.open_repo
         telegram=telegram,
         db_path=db_path if db_path.is_absolute() else base / db_path,
         screenshot_dir=screenshot_dir if screenshot_dir.is_absolute() else base / screenshot_dir,
@@ -418,4 +650,7 @@ def load_config(path: str | Path) -> Config:
         concurrency=_as_int(raw.get("concurrency", 2), "concurrency", 1),
         jitter_seconds=parse_duration(raw.get("jitter", "5s"), "jitter"),
         source_path=config_path,
+        web=web,
+        site_defaults=defaults,
+        seed_sites=seed_sites,
     )

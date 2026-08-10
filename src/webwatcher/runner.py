@@ -14,6 +14,7 @@ from webwatcher.browser import Renderer
 from webwatcher.compare import Diff, content_hash, make_diff, normalize
 from webwatcher.config import Config, SiteConfig
 from webwatcher.notify.telegram import TelegramError, TelegramNotifier
+from webwatcher.sites import SiteRepository
 from webwatcher.store import Store, from_iso, utcnow
 
 log = logging.getLogger(__name__)
@@ -53,16 +54,30 @@ class Runner:
         store: Store,
         renderer: Renderer,
         notifier: TelegramNotifier | None,
+        repo: SiteRepository | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.renderer = renderer
         self.notifier = notifier
+        self.repo = repo or SiteRepository(store, config.site_defaults, config.screenshot_dir)
         self._stop = asyncio.Event()
+        # Gesetzt, wenn sich von aussen etwas geändert hat (Web-UI): weckt die
+        # Schleife sofort, statt bis zu einer Minute zu warten.
+        self._wake = asyncio.Event()
         self._semaphore = asyncio.Semaphore(config.concurrency)
+        # Eine Seite nie zweimal gleichzeitig prüfen: seit das Web-UI Checks
+        # auslösen kann, kann ein Klick mit dem fälligen Lauf zusammenfallen.
+        # Beide läsen dann denselben (noch leeren) Zustand und legten je eine
+        # Baseline an - also zwei Meldungen für dieselbe Seite.
+        self._site_locks: dict[str, asyncio.Lock] = {}
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def wake(self) -> None:
+        """Neue oder geänderte Seite - Schleife soll jetzt nachsehen."""
+        self._wake.set()
 
     # -- single check -------------------------------------------------------
 
@@ -219,37 +234,78 @@ class Runner:
     # -- scheduling ---------------------------------------------------------
 
     def _next_due(self, site: SiteConfig) -> datetime:
-        jitter = random.uniform(0, self.config.jitter_seconds) if self.config.jitter_seconds else 0
-        return utcnow() + timedelta(seconds=site.interval_seconds + jitter)
+        now = utcnow()
+        interval = site.interval_at(now)
+        # Der Jitter streut die Seiten gegeneinander, darf ein 1-Minuten-Fenster
+        # aber nicht verwässern - daher an das Intervall gekoppelt.
+        spread = min(self.config.jitter_seconds, interval / 4)
+        due = now + timedelta(seconds=interval + (random.uniform(0, spread) if spread > 0 else 0))
+
+        # Faengt ein Fenster vorher an (oder hoert auf), dort aufwachen: sonst
+        # verschluckt der laufende 15m-Takt den Anfang des Fensters.
+        boundary = site.next_window_change(now)
+        return min(due, boundary) if boundary else due
+
+    def _site_lock(self, key: str) -> asyncio.Lock:
+        lock = self._site_locks.get(key)
+        if lock is None:
+            lock = self._site_locks[key] = asyncio.Lock()
+        return lock
 
     async def check_once(self, sites: list[SiteConfig], notify: bool = True) -> list[Outcome]:
         async def guarded(site: SiteConfig) -> Outcome:
-            async with self._semaphore:
+            # Erst die Seite belegen, dann einen Platz nehmen - andersherum
+            # würde ein wartender Doppellauf einen Slot blockieren.
+            async with self._site_lock(site.key), self._semaphore:
+                window = site.active_window(utcnow())
                 outcome = await self.check_site(site, notify=notify)
                 self.store.set_next_due(site.key, self._next_due(site))
-                log.info("%s: %s (%dms)", site.name, outcome.describe(), outcome.duration_ms)
+                log.info(
+                    "%s: %s (%dms)%s",
+                    site.name,
+                    outcome.describe(),
+                    outcome.duration_ms,
+                    f" [Fenster {window.describe()}]" if window else "",
+                )
                 return outcome
 
         return list(await asyncio.gather(*(guarded(site) for site in sites)))
 
-    async def run_forever(self) -> None:
-        sites = [site for site in self.config.sites if site.enabled]
+    def _announce(self, sites: list[SiteConfig]) -> None:
+        """Nach jeder Änderung an der Seitenliste einmal den Stand loggen."""
         if not sites:
-            log.warning("no enabled sites in config, nothing to do")
+            log.warning("keine aktiven Seiten - der Watcher wartet auf Konfiguration")
             return
-
-        for site in sites:
-            self.store.ensure_site(site.key, site.name, site.url)
         log.info(
             "watching %d site(s), concurrency=%d, db=%s",
             len(sites),
             self.config.concurrency,
             self.config.db_path,
         )
+        for site in sites:
+            self.store.ensure_site(site.key, site.name, site.url)
+            if site.interval_windows:
+                log.info(
+                    "%s: Zeitfenster (%s): %s",
+                    site.name,
+                    site.timezone,
+                    "; ".join(window.describe() for window in site.interval_windows),
+                )
 
+    async def run_forever(self) -> None:
         last_prune = utcnow()
+        known_revision = -1
+        sites: list[SiteConfig] = []
 
         while not self._stop.is_set():
+            # Die Seiten kommen aus der Datenbank, nicht aus einer Momentaufnahme
+            # beim Start: was das Web-UI ändert, gilt ab dem nächsten Durchlauf.
+            revision = self.repo.revision()
+            if revision != known_revision:
+                sites = self.repo.enabled_sites()
+                known_revision = revision
+                self._announce(sites)
+
             now = utcnow()
             due: list[SiteConfig] = []
             for site in sites:
@@ -281,7 +337,14 @@ class Runner:
 
         delay = min(waits) if waits else 60.0
         delay = max(1.0, min(delay, 60.0))
+
+        self._wake.clear()
+        waiters = [
+            asyncio.ensure_future(self._stop.wait()),
+            asyncio.ensure_future(self._wake.wait()),
+        ]
         try:
-            await asyncio.wait_for(self._stop.wait(), timeout=delay)
-        except asyncio.TimeoutError:
-            pass
+            await asyncio.wait(waiters, timeout=delay, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()

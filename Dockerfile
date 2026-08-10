@@ -10,7 +10,7 @@ WORKDIR /app
 # Dependencies first so the browser layer stays cached across code changes.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir '.[web]' \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,6 +21,11 @@ RUN useradd --create-home --uid 10001 watcher \
 USER watcher
 
 VOLUME ["/app/data"]
+
+# Nur das Web-UI, und auch das nur wenn es eingeschaltet ist. Bewusst kein
+# `ports:` in der docker-compose.yml: der Reverse Proxy erreicht den Container
+# über das Docker-Netz, der Host-Port bleibt zu.
+EXPOSE 8080
 
 ENTRYPOINT ["webwatcher", "--config", "/app/config.yaml"]
 CMD ["run"]

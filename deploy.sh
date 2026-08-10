@@ -2,7 +2,7 @@
 # Überträgt den Watcher auf den Server - ohne .venv, Daten und Secrets.
 #
 #   ./deploy.sh                        # an den Standard-Host, nur übertragen
-#   ./deploy.sh hetzner ~/docker/watcher
+#   ./deploy.sh hetzner ~/docker/watcher/watcher
 #   ./deploy.sh --restart              # danach neu bauen und starten
 #   DRY_RUN=1 ./deploy.sh              # nur zeigen, was übertragen würde
 #
@@ -22,7 +22,7 @@ for arg in "$@"; do
 done
 
 REMOTE="${ARGS[0]:-hetzner}"
-REMOTE_DIR="${ARGS[1]:-~/docker/watcher}"
+REMOTE_DIR="${ARGS[1]:-~/docker/watcher/watcher}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # .env bleibt aus: der Server hat seinen eigenen Token. config.yaml geht mit,
