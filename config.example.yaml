@@ -29,7 +29,9 @@ jitter: 5s # zufällige Streuung, damit nicht alles gleichzeitig läuft
 web:
     enabled: ${WEBWATCHER_WEB:-false}
     host: 0.0.0.0
-    port: 8080
+    # Dieselbe Variable steuert das Traefik-Label in der docker-compose.yml,
+    # damit App und Router nicht auseinanderlaufen.
+    port: ${WEBWATCHER_PORT:-8080}
     # Aus diesem Header liest das UI, wer gerade etwas ändert (nur fürs Protokoll).
     user_header: Cf-Access-Authenticated-User-Email
 

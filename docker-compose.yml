@@ -23,23 +23,34 @@ services:
 
     # -- Web-UI --------------------------------------------------------------
     # Einschalten mit WEBWATCHER_WEB=true in der .env (siehe config.example.yaml).
-    # Bewusst kein `ports:`: das UI kennt keine eigene Anmeldung und darf nicht
-    # am Host hängen. Traefik erreicht es über traefik-net.
+    #
+    # Abgesichert ist das UI dadurch, dass hier **kein `ports:`** steht - dann
+    # gibt es keine Veröffentlichung auf den Host, und nur wer im Docker-Netz
+    # ist (also Traefik) kommt hin.
+    #
+    # `expose:` leistet dazu nichts: Container im selben Netz erreichen einander
+    # auf jedem Port, auch ohne diesen Eintrag. Es steht hier als Dokumentation
+    # und als Rückfalloption - Traefiks automatische Port-Erkennung liest die
+    # exponierten Ports, falls das server.port-Label unten einmal fehlt.
+    # Verbindlich ist das Label.
+    #
+    # Alle Werte kommen aus der .env, die Vorgaben dahinter sind nur der
+    # Notnagel. WEBWATCHER_PORT gilt auch für die config.yaml - die App muss ja
+    # auf demselben Port lauschen, auf den Traefik zeigt.
     expose:
-      - "8080"
+      - "${WEBWATCHER_PORT:-8080}"
     networks:
       - default
-      - traefik-net
+      - traefik
     labels:
       traefik.enable: "true"
-      traefik.docker.network: traefik-net
-      traefik.http.routers.webwatcher.rule: Host(`webwatcher.fabraham.dev`)
-      traefik.http.routers.webwatcher.entrypoints: websecure
-      # DNS-Challenge statt HTTP-01: nötig, sobald der DNS-Eintrag bei
-      # Cloudflare proxied ist (orange Wolke) - und das ist er, wenn
-      # Cloudflare Access davor liegen soll.
-      traefik.http.routers.webwatcher.tls.certresolver: cfdns
-      traefik.http.services.webwatcher.loadbalancer.server.port: "8080"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik-net}
+      traefik.http.routers.webwatcher.rule: "Host(`${WEBWATCHER_HOST:-webwatcher.localhost}`)"
+      traefik.http.routers.webwatcher.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      # Für Cloudflare-proxied Einträge (orange Wolke, Voraussetzung für
+      # Cloudflare Access) ist ein DNS-Challenge-Resolver die robustere Wahl.
+      traefik.http.routers.webwatcher.tls.certresolver: ${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      traefik.http.services.webwatcher.loadbalancer.server.port: "${WEBWATCHER_PORT:-8080}"
 
       # BasicAuth als zweite Schicht - siehe README. Cloudflare Access allein
       # reicht nicht: wer die Server-IP kennt, kommt mit passendem Host-Header
@@ -54,6 +65,9 @@ volumes:
   webwatcher-data:
 
 networks:
-  # Das Netz aus dem Traefik-Compose (dort `name: traefik-net`).
-  traefik-net:
+  # Das vorhandene Netz des Reverse Proxy. `external` heißt: dieses Compose legt
+  # es nicht an, es muss schon existieren. Intern heißt es hier immer `traefik`,
+  # der echte Name kommt aus der .env.
+  traefik:
     external: true
+    name: ${TRAEFIK_NETWORK:-traefik-net}

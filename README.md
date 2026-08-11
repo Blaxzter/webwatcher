@@ -238,9 +238,27 @@ Neustart.
 ### Hinter Traefik
 
 Die mitgelieferte `docker-compose.yml` veröffentlicht bewusst **keinen**
-Host-Port (`expose:` statt `ports:`) und hängt den Container ins Netz
-`traefik-net`. Der Router steht auf `webwatcher.fabraham.dev` — Domain und
-Netzname dort anpassen, falls sie anders heißen.
+Host-Port — es gibt kein `ports:`, also erreicht nur Traefik das UI über dessen
+Docker-Netz. Das `expose:` darin ist reine Dokumentation; für Traefik zählt das
+Label `loadbalancer.server.port`.
+
+An der `docker-compose.yml` selbst ist nichts zu ändern, alles steht in der
+`.env`:
+
+| Variable | Default | Bedeutung |
+| --- | --- | --- |
+| `WEBWATCHER_WEB` | `false` | Oberfläche überhaupt starten |
+| `WEBWATCHER_HOST` | `webwatcher.localhost` | Domain, unter der sie läuft |
+| `WEBWATCHER_PORT` | `8080` | Port im Container — gilt für App **und** Traefik-Label |
+| `WEBWATCHER_AUTH` | – | BasicAuth-Hash, siehe unten |
+| `TRAEFIK_NETWORK` | `traefik-net` | vorhandenes Docker-Netz des Proxy |
+| `TRAEFIK_ENTRYPOINT` | `websecure` | Entrypoint aus deinem Traefik-Compose |
+| `TRAEFIK_CERTRESOLVER` | `letsencrypt` | Resolver aus deinem Traefik-Compose |
+
+`WEBWATCHER_PORT` steht absichtlich nur an dieser einen Stelle: die
+`config.yaml` liest ihn über `${WEBWATCHER_PORT:-8080}`, das Traefik-Label
+ebenso. Sonst zeigt der Router irgendwann auf einen Port, auf dem niemand
+lauscht.
 
 ```bash
 htpasswd -nB frederic          # Hash für die BasicAuth erzeugen
@@ -264,7 +282,7 @@ die `TRAEFIK_DASHBOARD_AUTH` deines Traefik-Compose.
 routet nach `Host`-Header, also kommt
 
 ```bash
-curl -H "Host: webwatcher.fabraham.dev" https://<server-ip>/ -k
+curl -H "Host: $WEBWATCHER_HOST" https://<server-ip>/ -k
 ```
 
 am Access-Login vorbei, wenn jemand die Server-IP kennt. Entweder die Firewall
