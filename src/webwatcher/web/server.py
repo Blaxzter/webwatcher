@@ -193,6 +193,14 @@ FIELDS: list[dict[str, Any]] = [
     },
     # -- Meldungen
     {
+        "name": "recipients",
+        "type": "recipients",
+        "group": "Meldungen",
+        "label": "Empfänger",
+        "help": "Nichts angehakt = alle aus TELEGRAM_CHAT_ID. Weitere IDs müssen dem Bot "
+        "vorher selbst geschrieben haben.",
+    },
+    {
         "name": "screenshot",
         "type": "enum",
         "group": "Meldungen",
@@ -266,6 +274,24 @@ class Context:
         self.repo = repo
         self.runner = runner
         self.picker = PickerRegistry(runner.renderer)
+        # Chat-ID -> Anzeigename, einmal bei Telegram nachgefragt.
+        self.chat_names: dict[str, str | None] = {}
+
+    async def chat_options(self) -> list[dict[str, str]]:
+        """Die konfigurierten Empfänger mit Namen, für die Häkchen im Formular."""
+        notifier = self.runner.notifier
+        options = []
+        for chat_id in self.config.telegram.chat_ids:
+            if chat_id not in self.chat_names:
+                name = await notifier.get_chat_name(chat_id) if notifier else None
+                if name is None:
+                    # Fehlschlag nicht merken - beim nächsten Öffnen neu versuchen.
+                    options.append({"value": chat_id, "label": chat_id})
+                    continue
+                self.chat_names[chat_id] = name
+            name = self.chat_names[chat_id]
+            options.append({"value": chat_id, "label": f"{name} ({chat_id})"})
+        return options
 
 
 def ctx(request: web.Request) -> Context:
@@ -381,12 +407,17 @@ async def get_state(request: web.Request) -> web.Response:
 
 async def get_schema(request: web.Request) -> web.Response:
     """Feldliste plus Defaults - das Frontend baut das Formular daraus."""
+    context = ctx(request)
     defaults = {
         key: value
-        for key, value in ctx(request).repo.defaults.items()
+        for key, value in context.repo.defaults.items()
         if key in {field["name"] for field in FIELDS}
     }
-    return web.json_response({"fields": FIELDS, "defaults": defaults})
+    chats = await context.chat_options()
+    fields = [
+        {**field, "options": chats} if field["name"] == "recipients" else field for field in FIELDS
+    ]
+    return web.json_response({"fields": fields, "defaults": defaults})
 
 
 async def get_history(request: web.Request) -> web.Response:

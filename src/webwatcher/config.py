@@ -26,6 +26,7 @@ KIND_VALUES = {"page", "hetzner_stock"}
 HETZNER_CONSOLE_URL = "https://console.hetzner.com/"
 _SERVER_TYPE_RE = re.compile(r"^[a-z0-9-]+$")
 _LOCATION_RE = re.compile(r"^[a-z]+[0-9]*$")
+_CHAT_ID_RE = re.compile(r"^(-?\d+|@\w+)$")
 RESOURCE_TYPES = {
     "document",
     "stylesheet",
@@ -95,6 +96,8 @@ SITE_DEFAULTS: dict[str, Any] = {
     "min_changed_lines": 1,
     "max_diff_lines": 60,
     "notify_first_check": True,
+    # Telegram-Chat-IDs nur für diese Seite. Leer = alle aus telegram.chat_id.
+    "recipients": [],
     "enabled": True,
 }
 
@@ -209,6 +212,7 @@ class SiteConfig:
     min_changed_lines: int
     max_diff_lines: int
     notify_first_check: bool
+    recipients: tuple[str, ...]
     enabled: bool
 
     def active_window(self, moment: datetime) -> IntervalWindow | None:
@@ -572,8 +576,23 @@ def _build_site(raw: dict[str, Any], defaults: dict[str, Any], index: int) -> Si
         notify_first_check=_as_bool(
             merged.get("notify_first_check"), f"{where}.notify_first_check"
         ),
+        recipients=_build_recipients(merged.get("recipients"), f"{where}.recipients"),
         enabled=_as_bool(merged.get("enabled"), f"{where}.enabled"),
     )
+
+
+def _build_recipients(value: Any, where: str) -> tuple[str, ...]:
+    """Chat-IDs einer Seite: Liste oder komma-getrennt, wie bei telegram.chat_id."""
+    if value is not None and not isinstance(value, str | int | list):
+        raise ConfigError(f"{where}: expected a chat id or a list of chat ids")
+    recipients = parse_chat_ids({"chat_ids": value})
+    for chat_id in recipients:
+        if not _CHAT_ID_RE.match(chat_id):
+            raise ConfigError(
+                f"{where}: invalid chat id {chat_id!r} (a number like 123456789, "
+                "groups start with -, channels with @)"
+            )
+    return recipients
 
 
 def parse_chat_ids(raw: dict[str, Any]) -> tuple[str, ...]:

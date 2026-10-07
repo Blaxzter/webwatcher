@@ -156,19 +156,28 @@ class TelegramNotifier:
             "disable_notification": self.config.silent or silent or None,
         }
 
-    def _report(self, errors: list[str]) -> None:
+    def _targets(self, chat_ids: tuple[str, ...] | None) -> tuple[str, ...]:
+        """Eigene Empfänger einer Seite, sonst alle aus der Konfiguration."""
+        return chat_ids or self.config.chat_ids
+
+    def _report(self, errors: list[str], targets: tuple[str, ...]) -> None:
         """One unreachable recipient must not silence the others."""
         if not errors:
             return
-        if len(errors) == len(self.config.chat_ids):
+        if len(errors) == len(targets):
             raise TelegramError("; ".join(errors))
         for entry in errors:
             log.error("telegram: %s", entry)
 
-    async def send_message(self, text: str, silent: bool = False) -> None:
+    async def send_message(
+        self, text: str, silent: bool = False, chat_ids: tuple[str, ...] | None = None
+    ) -> None:
         chunks = _chunks(text, MAX_MESSAGE_CHARS)
+        targets = self._targets(chat_ids)
+        if not targets:
+            raise TelegramError("chat_id fehlt - ermitteln mit: webwatcher chat-id")
         errors: list[str] = []
-        for chat_id in self.config.chat_ids:
+        for chat_id in targets:
             try:
                 for chunk in chunks:
                     await self._call(
@@ -181,9 +190,15 @@ class TelegramNotifier:
                     )
             except TelegramError as exc:
                 errors.append(f"Chat {chat_id}: {exc}")
-        self._report(errors)
+        self._report(errors, targets)
 
-    async def send_image(self, image: bytes, caption: str, filename: str) -> None:
+    async def send_image(
+        self,
+        image: bytes,
+        caption: str,
+        filename: str,
+        chat_ids: tuple[str, ...] | None = None,
+    ) -> None:
         """Send as photo when Telegram accepts it, otherwise as a file."""
         caption = caption[:MAX_CAPTION_CHARS]
         # Full-page screenshots are often far too tall for the photo endpoint.
@@ -191,9 +206,12 @@ class TelegramNotifier:
         method = "sendPhoto" if as_photo else "sendDocument"
         field = "photo" if as_photo else "document"
 
+        targets = self._targets(chat_ids)
+        if not targets:
+            raise TelegramError("chat_id fehlt - ermitteln mit: webwatcher chat-id")
         file_id: str | None = None
         errors: list[str] = []
-        for chat_id in self.config.chat_ids:
+        for chat_id in targets:
             payload = {**self._payload_for(chat_id), "caption": caption}
             try:
                 if file_id is not None:
@@ -207,7 +225,16 @@ class TelegramNotifier:
                     file_id = _file_id_from(result, as_photo)
             except TelegramError as exc:
                 errors.append(f"Chat {chat_id}: {exc}")
-        self._report(errors)
+        self._report(errors, targets)
+
+    async def get_chat_name(self, chat_id: str) -> str | None:
+        """Anzeigename eines Chats (Vorname, Gruppenname) - fürs Web-UI."""
+        try:
+            chat = await self._call("getChat", {"chat_id": chat_id}, retries=1)
+        except TelegramError:
+            return None
+        name = " ".join(str(chat[part]) for part in ("first_name", "last_name") if chat.get(part))
+        return name or chat.get("title") or chat.get("username")
 
     async def get_updates(self) -> list[dict]:
         result = await self._call("getUpdates", {"timeout": 0, "limit": 20}, retries=1)
@@ -218,15 +245,17 @@ class TelegramNotifier:
 
     # -- messages -----------------------------------------------------------
 
-    async def _deliver(self, header: str, body: str, image: bytes | None, key: str) -> None:
+    async def _deliver(self, site: SiteConfig, header: str, body: str, image: bytes | None) -> None:
         """Screenshot carries the header as caption; the body follows as text."""
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         if image and self.config.send_screenshot:
-            await self.send_image(image, header, f"{key}-{stamp}.png")
+            await self.send_image(image, header, f"{site.key}-{stamp}.png", site.recipients)
             if body:
-                await self.send_message(body)
+                await self.send_message(body, chat_ids=site.recipients)
         else:
-            await self.send_message(header + (f"\n\n{body}" if body else ""))
+            await self.send_message(
+                header + (f"\n\n{body}" if body else ""), chat_ids=site.recipients
+            )
 
     async def send_change(
         self, site: SiteConfig, diff: Diff, image: bytes | None, final_url: str
@@ -239,7 +268,7 @@ class TelegramNotifier:
         body = ""
         if diff.text:
             body = f"<pre>{html.escape(diff.text)}</pre>"
-        await self._deliver(header, body, image, site.key)
+        await self._deliver(site, header, body, image)
 
     async def send_baseline(
         self, site: SiteConfig, image: bytes | None, final_url: str, summary: str = ""
@@ -249,7 +278,7 @@ class TelegramNotifier:
             f'<a href="{html.escape(final_url or site.url, quote=True)}">Seite öffnen</a>'
         )
         body = f"<pre>{html.escape(summary)}</pre>" if summary else ""
-        await self._deliver(header, body, image, site.key)
+        await self._deliver(site, header, body, image)
 
     async def send_stock(
         self, site: SiteConfig, opened: list[str], closed: list[str], summary: str
@@ -262,16 +291,19 @@ class TelegramNotifier:
             + f'\n<a href="{html.escape(site.url, quote=True)}">Hetzner Console öffnen</a>'
             + f"\n\n<pre>{html.escape(summary)}</pre>",
             silent=not opened,
+            chat_ids=site.recipients,
         )
 
     async def send_error(self, site: SiteConfig, error: str, failures: int) -> None:
         await self.send_message(
             f"⚠️ <b>{html.escape(site.name)}</b> ist {failures}x hintereinander fehlgeschlagen\n"
             f"{html.escape(site.url)}\n"
-            f"<pre>{html.escape(error[:800])}</pre>"
+            f"<pre>{html.escape(error[:800])}</pre>",
+            chat_ids=site.recipients,
         )
 
     async def send_recovery(self, site: SiteConfig) -> None:
         await self.send_message(
-            f"✅ <b>{html.escape(site.name)}</b> ist wieder erreichbar\n{html.escape(site.url)}"
+            f"✅ <b>{html.escape(site.name)}</b> ist wieder erreichbar\n{html.escape(site.url)}",
+            chat_ids=site.recipients,
         )

@@ -372,6 +372,24 @@ schreiben, dann `webwatcher chat-id` — die Gruppen-ID ist negativ
 fügst du der Gruppe hinzu, ohne die Konfiguration anzufassen und ohne Neustart.
 Sieht der Bot die Nachricht nicht (Privacy-Modus), schreib `/start@dein_bot`.
 
+### Empfänger pro Seite
+
+Standardmäßig bekommt jeder Chat aus `TELEGRAM_CHAT_ID` jede Meldung. Soll eine
+Seite nur an bestimmte Leute gehen, im Web-UI unter **Meldungen → Empfänger**
+die Häkchen setzen (die Namen holt das UI bei Telegram). Ins Feld darunter
+kommen IDs, die *nur* diese Seite bekommen soll und die deshalb nicht in der
+`.env` stehen. Als Mapping:
+
+```yaml
+- name: Hetzner CX53
+  kind: hetzner_stock
+  server_type: cx53
+  recipients: [123456789]   # leer = alle aus TELEGRAM_CHAT_ID
+```
+
+Das gilt für alles, was diese Seite verschickt, also auch für Fehler- und
+Entwarnungsmeldungen. Der Test-Knopf im UI geht weiter an alle.
+
 Screenshots werden nur **einmal** hochgeladen und an die weiteren Empfänger per
 Telegram-`file_id` verteilt. Und blockiert einer der Empfänger den Bot, bekommen
 die anderen ihre Meldung trotzdem — der Fehler landet nur im Log.

@@ -96,6 +96,7 @@ function renderList() {
       : site.url;
     const sub = site.valid
       ? `${target} · alle ${site.interval}${site.window ? ` · Fenster ${site.window}` : ''}` +
+        (recipientNames(site) ? ` · an ${recipientNames(site)}` : '') +
         ` · zuletzt ${fmtTime(site.last_checked_at)}`
       : site.url;
 
@@ -256,7 +257,7 @@ function buildForm() {
     for (const field of group.fields) {
       const control = makeControl(field, editing.original[field.name]);
       controls[field.name] = control;
-      const wide = ['textarea', 'list', 'map', 'windows', 'multi'].includes(field.type);
+      const wide = ['textarea', 'list', 'map', 'windows', 'multi', 'recipients'].includes(field.type);
       set.append(el('div', { class: 'field', 'data-field': field.name, 'data-only': field.only },
         el('label', { text: field.label + (field.required ? ' *' : '') }),
         el('div', { class: wide ? 'wide' : '' },
@@ -391,12 +392,51 @@ function makeControl(field, value) {
     }
     case 'windows':
       return makeWindowsControl(value);
+    case 'recipients':
+      return makeRecipientsControl(field, value);
     default: {
       const node = el('input', { type: 'text', placeholder: placeholderFor(field) });
       if (value !== undefined) node.value = value;
       return { el: node, read: () => node.value.trim(), set: (next) => { node.value = next; } };
     }
   }
+}
+
+/* Häkchen für die Chats aus TELEGRAM_CHAT_ID, dazu ein Feld für IDs, die nur
+ * diese Seite bekommen soll. */
+function makeRecipientsControl(field, value) {
+  const chosen = [].concat(value ?? []).flatMap((id) => String(id).split(','))
+    .map((id) => id.trim()).filter(Boolean);
+  const known = field.options.map((option) => option.value);
+  const boxes = field.options.map((option) => {
+    const input = el('input', { type: 'checkbox', value: option.value });
+    input.checked = chosen.includes(option.value);
+    return el('label', { class: 'check' }, input, option.label);
+  });
+  const extra = el('input', {
+    type: 'text', placeholder: 'weitere Chat-IDs, mit Komma getrennt',
+    value: chosen.filter((id) => !known.includes(id)).join(', '),
+  });
+  const node = el('div', {}, boxes.length ? el('div', { class: 'chips' }, ...boxes) : null, extra);
+  return {
+    el: node,
+    read: () => [
+      ...Array.from(node.querySelectorAll('input:checked')).map((input) => input.value),
+      ...extra.value.split(',').map((id) => id.trim()).filter(Boolean),
+    ],
+    set: () => {},
+  };
+}
+
+function recipientNames(site) {
+  const ids = [].concat(site.mapping.recipients ?? []);
+  if (!ids.length || !schema) return '';
+  const options = schema.fields.find((field) => field.name === 'recipients')?.options || [];
+  // "Anna (123)" -> "Anna"; unbekannte IDs bleiben als Zahl stehen.
+  return ids.map((id) => {
+    const label = options.find((option) => option.value === String(id))?.label;
+    return label ? label.replace(/ \([^)]*\)$/, '') : String(id);
+  }).join(', ');
 }
 
 function makeWindowsControl(value) {
