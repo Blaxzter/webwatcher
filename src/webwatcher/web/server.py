@@ -8,6 +8,7 @@ liegender Reverse Proxy (siehe WebConfig).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -685,8 +686,23 @@ async def error_middleware(request: web.Request, handler: Any) -> web.StreamResp
         return web.json_response({"error": f"{exc.__class__.__name__}: {exc}"}, status=500)
 
 
+def _asset_version() -> str:
+    """Ändert sich mit jeder neuen app.js/style.css - siehe index()."""
+    digest = hashlib.sha256()
+    for name in ("app.js", "style.css"):
+        digest.update((STATIC_DIR / name).read_bytes())
+    return digest.hexdigest()[:12]
+
+
 async def index(request: web.Request) -> web.StreamResponse:  # noqa: ARG001
-    return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    # /static hat kein Cache-Control, der Browser hält app.js also nach
+    # Gutdünken vor. Mit ?v=... holt er nach einem Update garantiert die neue,
+    # statt das neue Schema mit dem alten Formularcode zu zeigen.
+    version = _asset_version()
+    page = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    page = page.replace('"static/app.js"', f'"static/app.js?v={version}"')
+    page = page.replace('"static/style.css"', f'"static/style.css?v={version}"')
+    return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 def build_app(
