@@ -134,6 +134,15 @@ sites:
       #       interval: 1m
       #       days: [mo, di, mi, do, fr]
 
+      # # Kein Browser: Hetzner-Cloud-API fragt, ob ein Servertyp bestellbar ist.
+      # # Braucht HCLOUD_TOKEN in der .env (Token mit Leserecht, siehe README).
+      # # Meldet nur den Wechsel ausverkauft -> verfügbar (und still zurück).
+      # - name: Hetzner CX53
+      #   kind: hetzner_stock
+      #   server_type: cx53
+      #   locations: [nbg1, fsn1] # leer = alle Standorte
+      #   interval: 5m
+
       # # Nur HTML-Struktur vergleichen (erkennt auch Änderungen an Links/Attributen)
       # - name: Downloads
       #   url: https://example.net/downloads

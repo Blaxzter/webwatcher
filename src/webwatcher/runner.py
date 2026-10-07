@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from webwatcher.browser import Renderer
+from webwatcher import hetzner
+from webwatcher.browser import Renderer, RenderResult
 from webwatcher.compare import Diff, content_hash, make_diff, normalize
 from webwatcher.config import Config, SiteConfig
 from webwatcher.notify.telegram import TelegramError, TelegramNotifier
@@ -81,13 +82,19 @@ class Runner:
 
     # -- single check -------------------------------------------------------
 
+    async def fetch(self, site: SiteConfig) -> RenderResult:
+        """Inhalt holen - per Browser oder, bei hetzner_stock, über die API."""
+        if site.kind == "hetzner_stock":
+            return await hetzner.fetch(site)
+        return await self.renderer.render(site)
+
     async def check_site(self, site: SiteConfig, notify: bool = True) -> Outcome:
         started = time.monotonic()
         self.store.ensure_site(site.key, site.name, site.url)
         state = self.store.get_state(site.key)
 
         try:
-            result = await self.renderer.render(site)
+            result = await self.fetch(site)
         except Exception as exc:  # noqa: BLE001 - any render failure is just a failed check
             # CancelledError derives from BaseException, so shutdown still propagates.
             message = str(exc).strip().splitlines()[0][:500] or exc.__class__.__name__
@@ -120,7 +127,12 @@ class Runner:
             notified = False
             if notify and site.notify_first_check and self.notifier:
                 notified = await self._safe_notify(
-                    self.notifier.send_baseline(site, result.screenshot, result.final_url)
+                    self.notifier.send_baseline(
+                        site,
+                        result.screenshot,
+                        result.final_url,
+                        summary=content if site.kind == "hetzner_stock" else "",
+                    )
                 )
             return Outcome(site, STATUS_BASELINE, duration_ms=result.duration_ms, notified=notified)
 
@@ -165,7 +177,14 @@ class Runner:
         )
 
         notified = False
-        if notify and self.notifier:
+        if notify and self.notifier and site.kind == "hetzner_stock":
+            # Kein Diff, sondern Klartext: was ist bestellbar geworden?
+            opened, closed = hetzner.changes(previous_content, content)
+            if opened or closed:
+                notified = await self._safe_notify(
+                    self.notifier.send_stock(site, opened, closed, content)
+                )
+        elif notify and self.notifier:
             notified = await self._safe_notify(
                 self.notifier.send_change(site, diff, result.screenshot, result.final_url)
             )

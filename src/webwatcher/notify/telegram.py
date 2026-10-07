@@ -149,11 +149,11 @@ class TelegramNotifier:
 
         raise TelegramError(f"{method} fehlgeschlagen - {last_error}")
 
-    def _payload_for(self, chat_id: str) -> dict[str, object]:
+    def _payload_for(self, chat_id: str, silent: bool = False) -> dict[str, object]:
         return {
             "chat_id": chat_id,
             "parse_mode": "HTML",
-            "disable_notification": self.config.silent or None,
+            "disable_notification": self.config.silent or silent or None,
         }
 
     def _report(self, errors: list[str]) -> None:
@@ -165,7 +165,7 @@ class TelegramNotifier:
         for entry in errors:
             log.error("telegram: %s", entry)
 
-    async def send_message(self, text: str) -> None:
+    async def send_message(self, text: str, silent: bool = False) -> None:
         chunks = _chunks(text, MAX_MESSAGE_CHARS)
         errors: list[str] = []
         for chat_id in self.config.chat_ids:
@@ -174,7 +174,7 @@ class TelegramNotifier:
                     await self._call(
                         "sendMessage",
                         {
-                            **self._payload_for(chat_id),
+                            **self._payload_for(chat_id, silent),
                             "text": chunk,
                             "link_preview_options": '{"is_disabled": true}',
                         },
@@ -241,12 +241,28 @@ class TelegramNotifier:
             body = f"<pre>{html.escape(diff.text)}</pre>"
         await self._deliver(header, body, image, site.key)
 
-    async def send_baseline(self, site: SiteConfig, image: bytes | None, final_url: str) -> None:
+    async def send_baseline(
+        self, site: SiteConfig, image: bytes | None, final_url: str, summary: str = ""
+    ) -> None:
         header = (
             f"👀 <b>{html.escape(site.name)}</b> wird jetzt beobachtet\n"
             f'<a href="{html.escape(final_url or site.url, quote=True)}">Seite öffnen</a>'
         )
-        await self._deliver(header, "", image, site.key)
+        body = f"<pre>{html.escape(summary)}</pre>" if summary else ""
+        await self._deliver(header, body, image, site.key)
+
+    async def send_stock(
+        self, site: SiteConfig, opened: list[str], closed: list[str], summary: str
+    ) -> None:
+        """Hetzner: bestellbar geworden mit Ton, wieder ausverkauft nur still."""
+        lines = [f"🟢 <b>{html.escape(head)}</b> ist wieder bestellbar" for head in opened]
+        lines += [f"🔴 {html.escape(head)} ist wieder ausverkauft" for head in closed]
+        await self.send_message(
+            "\n".join(lines)
+            + f'\n<a href="{html.escape(site.url, quote=True)}">Hetzner Console öffnen</a>'
+            + f"\n\n<pre>{html.escape(summary)}</pre>",
+            silent=not opened,
+        )
 
     async def send_error(self, site: SiteConfig, error: str, failures: int) -> None:
         await self.send_message(

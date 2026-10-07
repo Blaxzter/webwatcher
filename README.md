@@ -590,6 +590,59 @@ für Links, deren Ziel sich ändert, während der Linktext gleich bleibt.
 unbrauchbar: eine Tabellenzeile ist *eine* Zeile Markup, die im Diff nach 300
 Zeichen abgeschnitten wird. `track_attributes` ist dafür der gezieltere Weg.
 
+### Hetzner-Cloud-Server wieder bestellbar?
+
+Ist ein Servertyp ausverkauft, sagt die Hetzner Console beim Bestellen nur
+„Preselected server type is not available". Dafür braucht es keine Webseite und
+keinen Login: `kind: hetzner_stock` fragt die öffentliche Cloud-API, die genau
+diese Information pro Standort liefert.
+
+**Token anlegen** — einmalig in der [Hetzner Console](https://console.hetzner.com/):
+Projekt öffnen → **Sicherheit** → **API-Tokens** → **API-Token generieren**,
+Berechtigung **Lesen**. Der Token wird nur ein einziges Mal angezeigt. Welches
+Projekt ist egal, die Verfügbarkeit ist überall gleich. Er läuft nicht ab und
+braucht keine 2FA. Mit „Lesen“ kann er nichts bestellen und nichts löschen.
+Dann in die `.env`:
+
+```bash
+HCLOUD_TOKEN=dein-token
+```
+
+und den Container neu erstellen (`docker compose up -d`; ein bloßes `restart`
+liest die `.env` nicht neu ein). Der Token bleibt in der Umgebung — er landet
+weder in der Datenbank noch im Web-UI.
+
+**Einrichten** — im Web-UI *Neue Seite* → Art `hetzner_stock`, Servertyp `cx53`,
+Standorte anhaken. Als Mapping:
+
+```yaml
+- name: Hetzner CX53
+  kind: hetzner_stock
+  server_type: cx53          # wie in der Console, klein oder groß
+  locations: [nbg1, fsn1]    # leer = alle Standorte
+  interval: 5m
+```
+
+Standorte: `nbg1` Nürnberg, `fsn1` Falkenstein, `hel1` Helsinki, `ash` Ashburn,
+`hil` Hillsboro, `sin` Singapur.
+
+Verglichen wird eine Zeile pro Standort. Die Meldung kommt ohne Diff, nur der Wechsel steht drin:
+
+```
+🟢 CX53 Nürnberg (nbg1) ist wieder bestellbar
+Hetzner Console öffnen
+
+CX53 Nürnberg (nbg1): verfügbar
+CX53 Falkenstein (fsn1): ausverkauft
+```
+
+Wird er wieder ausverkauft, kommt eine 🔴-Nachricht **ohne Ton**. Ein falscher
+oder fehlender Token zählt als normaler Fehlversuch und wird nach
+`notify_on_error_after` gemeldet. Die API erlaubt 3600 Anfragen pro Stunde und
+Projekt, also wird selbst ein `interval: 1m` nicht ausgebremst. Läuft im selben
+Projekt viel Automatisierung (Terraform o.ä.), den Token lieber in einem leeren
+eigenen Projekt anlegen, damit sich beide das Limit nicht teilen.
+
 ### Was der Screenshot zeigt
 
 Standardmäßig (`screenshot: auto`) zeigt das Bild das, was auch verglichen wird:

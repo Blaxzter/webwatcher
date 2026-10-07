@@ -187,6 +187,8 @@ class SiteRepository:
         """Anlegen oder ändern. Validiert zuerst, schreibt nur bei Erfolg."""
         mapping = clean_mapping(raw)
         name = str(mapping.get("name") or mapping.get("url") or "").strip()
+        if not name and mapping.get("server_type"):
+            name = f"hetzner {mapping['server_type']}"
         explicit = str(mapping.get("key") or "").strip()
 
         if explicit:
@@ -243,7 +245,12 @@ class SiteRepository:
             try:
                 mapping = clean_mapping(raw)
                 key = _slugify(
-                    str(mapping.get("key") or mapping.get("name") or mapping.get("url") or "")
+                    str(
+                        mapping.get("key")
+                        or mapping.get("name")
+                        or mapping.get("url")
+                        or f"hetzner {mapping.get('server_type') or ''}"
+                    )
                 )
                 if self.store.get_site_config(key) is not None:
                     skipped.append((label, f"Key {key!r} existiert bereits"))

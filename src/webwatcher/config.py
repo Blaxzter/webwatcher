@@ -21,6 +21,11 @@ DEFAULT_USER_AGENT = (
 WAIT_UNTIL_VALUES = {"load", "domcontentloaded", "networkidle", "commit"}
 SCREENSHOT_VALUES = {"auto", "full_page", "viewport", "element", "none"}
 MODE_VALUES = {"text", "html"}
+# page = Webseite im Browser rendern, hetzner_stock = Hetzner-Cloud-API fragen.
+KIND_VALUES = {"page", "hetzner_stock"}
+HETZNER_CONSOLE_URL = "https://console.hetzner.com/"
+_SERVER_TYPE_RE = re.compile(r"^[a-z0-9-]+$")
+_LOCATION_RE = re.compile(r"^[a-z]+[0-9]*$")
 RESOURCE_TYPES = {
     "document",
     "stylesheet",
@@ -59,6 +64,10 @@ _WEEKDAYS = {
 # Site-level knobs and their fallbacks. Anything listed here can be set globally
 # under `defaults:` and overridden per site.
 SITE_DEFAULTS: dict[str, Any] = {
+    "kind": "page",
+    # Nur für kind: hetzner_stock - z.B. cx53 und [nbg1, fsn1] (leer = alle).
+    "server_type": None,
+    "locations": [],
     "interval": "15m",
     # Zeitfenster mit abweichendem (meist engerem) Takt, siehe _build_windows.
     "interval_windows": [],
@@ -173,6 +182,9 @@ class SiteConfig:
     key: str
     name: str
     url: str
+    kind: str
+    server_type: str | None
+    locations: list[str]
     interval_seconds: float
     interval_windows: tuple[IntervalWindow, ...]
     mode: str
@@ -442,13 +454,36 @@ def _build_site(raw: dict[str, Any], defaults: dict[str, Any], index: int) -> Si
     if not isinstance(raw, dict):
         raise ConfigError(f"sites[{index}]: expected a mapping")
 
+    kind = _one_of(
+        raw.get("kind") or defaults.get("kind") or "page", KIND_VALUES, f"sites[{index}].kind"
+    )
+    server_type: str | None = None
+    locations: list[str] = []
+    if kind == "hetzner_stock":
+        server_type = str(raw.get("server_type") or "").strip().lower() or None
+        if not server_type:
+            raise ConfigError(f"sites[{index}]: 'server_type' is required (e.g. cx53)")
+        if not _SERVER_TYPE_RE.match(server_type):
+            raise ConfigError(f"sites[{index}].server_type: invalid value {server_type!r}")
+        for item in _as_str_list(raw.get("locations"), f"sites[{index}].locations"):
+            for part in item.split(","):
+                code = part.strip().lower()
+                if code and not _LOCATION_RE.match(code):
+                    raise ConfigError(f"sites[{index}].locations: invalid location {code!r}")
+                if code and code not in locations:
+                    locations.append(code)
+
+    # Bei hetzner_stock ist die URL nur der Link in der Meldung.
     url = str(raw.get("url") or "").strip()
+    if not url and kind == "hetzner_stock":
+        url = HETZNER_CONSOLE_URL
     if not url:
         raise ConfigError(f"sites[{index}]: 'url' is required")
     if not url.startswith(("http://", "https://")):
         raise ConfigError(f"sites[{index}]: url must start with http:// or https://, got {url!r}")
 
-    name = str(raw.get("name") or url).strip()
+    fallback_name = f"Hetzner {server_type.upper()}" if server_type else url
+    name = str(raw.get("name") or fallback_name).strip()
     where = f"sites[{index}] ({name})"
 
     # `None` in a site block means "not set here" so the default still wins.
@@ -504,6 +539,9 @@ def _build_site(raw: dict[str, Any], defaults: dict[str, Any], index: int) -> Si
         key=key,
         name=name,
         url=url,
+        kind=kind,
+        server_type=server_type,
+        locations=locations,
         interval_seconds=max(5.0, parse_duration(merged.get("interval"), f"{where}.interval")),
         interval_windows=windows,
         mode=_one_of(merged.get("mode"), MODE_VALUES, f"{where}.mode"),

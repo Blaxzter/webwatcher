@@ -90,8 +90,12 @@ function renderList() {
   $('#empty').hidden = sites.length > 0;
 
   for (const site of sites) {
+    const target = site.kind === 'hetzner_stock'
+      ? `Hetzner ${String(site.mapping.server_type || '').toUpperCase()} · `
+        + ([].concat(site.mapping.locations || []).join(', ') || 'alle Standorte')
+      : site.url;
     const sub = site.valid
-      ? `${site.url} · alle ${site.interval}${site.window ? ` · Fenster ${site.window}` : ''}` +
+      ? `${target} · alle ${site.interval}${site.window ? ` · Fenster ${site.window}` : ''}` +
         ` · zuletzt ${fmtTime(site.last_checked_at)}`
       : site.url;
 
@@ -253,7 +257,7 @@ function buildForm() {
       const control = makeControl(field, editing.original[field.name]);
       controls[field.name] = control;
       const wide = ['textarea', 'list', 'map', 'windows', 'multi'].includes(field.type);
-      set.append(el('div', { class: 'field', 'data-field': field.name },
+      set.append(el('div', { class: 'field', 'data-field': field.name, 'data-only': field.only },
         el('label', { text: field.label + (field.required ? ' *' : '') }),
         el('div', { class: wide ? 'wide' : '' },
           control.el,
@@ -262,6 +266,23 @@ function buildForm() {
     }
     form.append(set);
   }
+  controls.kind.el.addEventListener('change', applyKind);
+  applyKind();
+}
+
+const currentKind = () => (controls.kind && controls.kind.read()) || schema.defaults.kind || 'page';
+
+/* Felder mit `only` gelten nur für eine Art (page / hetzner_stock); die
+ * anderen samt leer gewordener Gruppen ausblenden. */
+function applyKind() {
+  const kind = currentKind();
+  for (const node of document.querySelectorAll('#form .field[data-only]')) {
+    node.hidden = node.dataset.only !== kind;
+  }
+  for (const set of document.querySelectorAll('#form fieldset')) {
+    set.hidden = !set.querySelector('.field:not([hidden])');
+  }
+  document.querySelector('.tabs button[data-tab="picker"]').hidden = kind !== 'page';
 }
 
 function placeholderFor(field) {
@@ -418,7 +439,10 @@ function makeWindowsControl(value) {
  * einzige Art, einen globalen defaults-Wert bewusst abzuräumen. */
 function readForm() {
   const mapping = {};
+  const kind = currentKind();
   for (const [name, control] of Object.entries(controls)) {
+    const only = schema.fields.find((field) => field.name === name)?.only;
+    if (only && only !== kind) continue;
     const value = control.read();
     if (value === undefined || value === '') continue;
     const isEmpty = (Array.isArray(value) && !value.length)
@@ -432,7 +456,11 @@ function readForm() {
 
 async function save() {
   const mapping = readForm();
-  if (!mapping.url) { banner('Ohne URL geht es nicht.'); return; }
+  if (currentKind() === 'page' && !mapping.url) { banner('Ohne URL geht es nicht.'); return; }
+  if (currentKind() === 'hetzner_stock' && !mapping.server_type) {
+    banner('Ohne Servertyp geht es nicht (z.B. cx53).');
+    return;
+  }
   const button = $('#save');
   button.disabled = true;
   try {

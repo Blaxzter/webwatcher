@@ -16,6 +16,7 @@ from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 
 from webwatcher.config import (
+    KIND_VALUES,
     MODE_VALUES,
     RESOURCE_TYPES,
     SCREENSHOT_VALUES,
@@ -24,6 +25,7 @@ from webwatcher.config import (
     ConfigError,
     format_duration,
 )
+from webwatcher.hetzner import LOCATION_NAMES
 from webwatcher.runner import Runner
 from webwatcher.sites import SiteEntry, SiteRepository
 from webwatcher.store import Store, from_iso, utcnow
@@ -38,6 +40,34 @@ STATIC_DIR = Path(__file__).with_name("static")
 # beschreiben - eine neue Option in SITE_DEFAULTS braucht genau einen Eintrag.
 FIELDS: list[dict[str, Any]] = [
     # -- Grundeinstellungen
+    {
+        "name": "kind",
+        "type": "enum",
+        "group": "Grunddaten",
+        "label": "Art",
+        "options": sorted(KIND_VALUES),
+        "help": "page = Webseite im Browser, hetzner_stock = Verfügbarkeit eines "
+        "Hetzner-Cloud-Servertyps (braucht HCLOUD_TOKEN in der .env).",
+    },
+    {
+        "name": "server_type",
+        "type": "text",
+        "group": "Grunddaten",
+        "label": "Servertyp",
+        "required": True,
+        "only": "hetzner_stock",
+        "help": "Wie in der Console, z.B. cx53.",
+    },
+    {
+        "name": "locations",
+        "type": "multi",
+        "group": "Grunddaten",
+        "label": "Standorte",
+        "options": list(LOCATION_NAMES),
+        "only": "hetzner_stock",
+        "help": "nbg1 Nürnberg, fsn1 Falkenstein, hel1 Helsinki, ash Ashburn, hil Hillsboro, "
+        "sin Singapur. Keiner gewählt = alle.",
+    },
     {
         "name": "url",
         "type": "text",
@@ -193,6 +223,33 @@ FIELDS: list[dict[str, Any]] = [
     },
 ]
 
+# Was nur beim Rendern im Browser eine Rolle spielt - bei hetzner_stock blendet
+# das UI diese Felder aus.
+_PAGE_ONLY = {
+    "url",
+    "selector",
+    "mode",
+    "ignore_selectors",
+    "ignore_patterns",
+    "track_attributes",
+    "wait_until",
+    "wait_for",
+    "settle",
+    "js",
+    "viewport",
+    "user_agent",
+    "locale",
+    "headers",
+    "block_resources",
+    "ignore_https_errors",
+    "screenshot",
+    "min_changed_lines",
+    "max_diff_lines",
+}
+for _field in FIELDS:
+    if _field["name"] in _PAGE_ONLY:
+        _field["only"] = "page"
+
 
 class Context:
     """Alles, was die Handler brauchen - hängt unter app['ctx']."""
@@ -244,7 +301,8 @@ def site_payload(entry: SiteEntry, state: Any, now: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "key": entry.key,
         "name": entry.name,
-        "url": str(entry.mapping.get("url") or ""),
+        "url": site.url if site else str(entry.mapping.get("url") or ""),
+        "kind": site.kind if site else str(entry.mapping.get("kind") or "page"),
         "valid": entry.valid,
         "error": entry.error,
         "enabled": bool(site.enabled) if site else bool(entry.mapping.get("enabled", True)),
@@ -476,6 +534,24 @@ async def preview_site(request: web.Request) -> web.Response:
     """Zweimal rendern und melden, was zwischen den Läufen wackelt."""
     context = ctx(request)
     site = context.repo.validate(await body(request))
+    if site.kind == "hetzner_stock":
+        # Eine API-Antwort wackelt nicht - einmal abfragen genügt.
+        try:
+            result = await context.runner.fetch(site)
+        except Exception as exc:  # noqa: BLE001 - im Panel anzeigen
+            return web.json_response({"ok": False, "error": str(exc)[:300]})
+        lines = result.text.splitlines()
+        return web.json_response(
+            {
+                "ok": True,
+                "count": len(lines),
+                "chars": len(result.text),
+                "sample": lines,
+                "unstable": [],
+                "suggestions": [],
+                "matches": 1,
+            }
+        )
     return web.json_response(await context.picker.preview(site))
 
 
